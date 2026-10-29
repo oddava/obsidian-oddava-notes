@@ -1,0 +1,29 @@
+{
+	"name": "oddava-notes",
+	"version": "1.0.0",
+	"description": "Publish and sync Obsidian notes with oddava.me.",
+	"main": "main.js",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production && node scripts/check-bundle.mjs",
+		"test": "vitest run",
+		"version-bump": "node version-bump.mjs",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"oddava"
+	],
+	"author": "oddava",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^22.15.17",
+		"esbuild": "0.25.5",
+		"obsidian": "latest",
+		"typescript": "^5.8.3",
+		"vitest": "^3.2.4"
+	}
+}

@@ -1,0 +1,24 @@
+/*
+Token field and setting copy for Oddava Notes.
+Obsidian loads this file when the plugin is enabled.
+*/
+
+.oddava-notes-settings .setting-item-description {
+	line-height: 1.45;
+}
+
+.oddava-notes-settings input[type='password'],
+.oddava-notes-settings input[type='text'] {
+	font-family: var(--font-monospace);
+}
+
+.oddava-notes-move-notice {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 8px;
+}
+
+.oddava-notes-move-notice button {
+	margin-top: 4px;
+}
