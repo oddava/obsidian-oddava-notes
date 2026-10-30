@@ -15,6 +15,8 @@ describe('mergeSettings', () => {
 		expect(settings.baseUrl).toBe('https://oddava.me');
 		expect(settings.syncFolder).toBe('oddava.me');
 		expect(settings.apiToken).toBe('');
+		expect(settings.telegramBotToken).toBe('');
+		expect(settings.telegramChannel).toBe('@justoddava');
 	});
 
 	it('keeps an explicit auto-pull choice and raises a too-small interval', () => {

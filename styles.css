@@ -23,3 +23,24 @@ Obsidian loads this file when the plugin is enabled.
 .oddava-notes-move-notice button {
 	margin-top: 4px;
 }
+
+.oddava-notes-telegram-warning {
+	color: var(--text-warning);
+}
+
+.oddava-notes-telegram-preview {
+	white-space: pre-wrap;
+	margin: 0.5em 0 0;
+	padding: 8px 10px;
+	max-height: 40vh;
+	overflow: auto;
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+}
+
+.oddava-notes-telegram-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+}
