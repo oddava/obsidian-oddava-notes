@@ -11,7 +11,7 @@ import {
 	type PullSource,
 } from './auto-pull';
 import { createDebouncer, PUBLISH_DEBOUNCE_MS, type Debouncer } from './debounce';
-import { NotesApiError } from './errors';
+import { isRateLimited, NotesApiError } from './errors';
 import { explainError, redact } from './messages';
 import { createObsidianHttp } from './obsidian-http';
 import {
@@ -59,11 +59,20 @@ import {
 	bulkDeletePrompt,
 	canonicalApiPath,
 	createMoveChain,
+	createRestartingBatcher,
 	leftFolderPrompt,
 	planDeleteBatch,
-	planRestore,
+	performRestore,
 	planVaultRename,
+	runUntilRateLimit,
+	deleteTargetAfterMove,
+	probeSaysMissing,
+	probeSaysTrashed,
+	shouldAdoptMove,
+	SITE_DELETE_DEBOUNCE_MS,
 	siteDeletePrompt,
+	summarizeMoveRun,
+	summarizeTrashRun,
 } from './vault-sync';
 import type { HttpClient } from './types';
 import type { LocalNote } from './sync';
@@ -80,12 +89,18 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 	private readonly telegramSending = new Set<string>();
 	private readonly pendingSiteDeletes = new Set<string>();
 	private readonly moveChain = createMoveChain();
-	private readonly siteDeleteQueue: {
-		apiPath: string;
-		revision: string;
-		kind: 'deleted' | 'left-folder';
-	}[] = [];
-	private siteDeleteFlush: number | null = null;
+	private readonly deleteBatcher = createRestartingBatcher<
+		{ apiPath: string; revision: string; kind: 'deleted' | 'left-folder' }
+	>(
+		SITE_DELETE_DEBOUNCE_MS,
+		(callback, ms) => {
+			const id = window.setTimeout(callback, ms);
+			return () => window.clearTimeout(id);
+		},
+		(batch) => {
+			void this.flushSiteDeletes(batch);
+		},
+	);
 	/** Rename and delete are ignored until the workspace layout is ready. */
 	private vaultReady = false;
 	private readonly pulls = createPullGate();
@@ -196,7 +211,7 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 	onunload(): void {
 		this.alive = false;
 		this.vaultReady = false;
-		if (this.siteDeleteFlush !== null) window.clearTimeout(this.siteDeleteFlush);
+		this.deleteBatcher.cancel();
 		this.autoPull.stop();
 		this.debouncer.cancelAll();
 	}
@@ -707,9 +722,35 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		if (!this.alive || !this.vaultReady) return;
 		if (this.remoteWrites.has(file.path) || this.remoteWrites.has(oldPath)) return;
 		if (file instanceof TFolder) {
+			const moves: { file: TFile; fromApiPath: string; toApiPath: string; revision: string }[] = [];
 			for (const child of this.markdownUnder(file)) {
 				const suffix = child.path.slice(file.path.length);
-				await this.onNoteRename(child, `${oldPath}${suffix}`);
+				const childOld = `${oldPath}${suffix}`;
+				const plan = planVaultRename(this.settings.syncFolder, childOld, child.path);
+				if (plan.kind === 'move-on-site') {
+					const record = this.settings.synced[plan.fromApiPath];
+					if (!record && !this.moveChain.has(plan.fromApiPath)) continue;
+					moves.push({
+						file: child,
+						fromApiPath: plan.fromApiPath,
+						toApiPath: plan.toApiPath,
+						revision: record?.revision ?? '',
+					});
+					continue;
+				}
+				await this.onNoteRename(child, childOld);
+			}
+			if (moves.length === 1) {
+				const job = moves[0];
+				if (job) {
+					void this.moveChain.enqueue(job.fromApiPath, job.toApiPath, job.revision || undefined, (from, to, revision) =>
+						this.moveOnSite(job.file, from, to, revision).then((result) =>
+							result.status === 'ok' ? result.revision : null,
+						),
+					);
+				}
+			} else if (moves.length > 1) {
+				await this.runFolderMoves(moves);
 			}
 			return;
 		}
@@ -734,7 +775,10 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			plan.fromApiPath,
 			plan.toApiPath,
 			record?.revision,
-			(from, to, revision) => this.moveOnSite(file, from, to, revision),
+			(from, to, revision) =>
+				this.moveOnSite(file, from, to, revision).then((result) =>
+					result.status === 'ok' ? result.revision : null,
+				),
 		);
 	}
 
@@ -756,54 +800,88 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		this.queueSiteDelete({ apiPath: mapped.apiPath, revision, kind: 'deleted' });
 	}
 
+	private queuedDeletes = new Set<string>();
+
 	private queueSiteDelete(item: {
 		apiPath: string;
 		revision: string;
 		kind: 'deleted' | 'left-folder';
 	}): void {
-		if (this.pendingSiteDeletes.has(item.apiPath)) return;
-		if (this.siteDeleteQueue.some((queued) => queued.apiPath === item.apiPath)) return;
-		this.siteDeleteQueue.push(item);
-		if (this.siteDeleteFlush !== null) return;
-		this.siteDeleteFlush = window.setTimeout(() => {
-			this.siteDeleteFlush = null;
-			const batch = this.siteDeleteQueue.splice(0);
-			this.flushSiteDeletes(batch);
-		}, 0);
+		if (this.pendingSiteDeletes.has(item.apiPath) || this.queuedDeletes.has(item.apiPath)) return;
+		this.queuedDeletes.add(item.apiPath);
+		this.deleteBatcher.push(item);
 	}
 
-	private flushSiteDeletes(
+	private async flushSiteDeletes(
 		batch: { apiPath: string; revision: string; kind: 'deleted' | 'left-folder' }[],
-	): void {
+	): Promise<void> {
+		for (const item of batch) this.queuedDeletes.delete(item.apiPath);
 		if (!this.alive || batch.length === 0) return;
+		const actionable = await this.dropAlreadyTrashed(batch);
+		if (actionable.length === 0) return;
 		const choice = planDeleteBatch({
-			count: batch.length,
+			count: actionable.length,
 			setting: this.settings.siteDelete,
-			leftFolder: batch.length === 1 && batch[0]?.kind === 'left-folder',
+			leftFolder: actionable.length === 1 && actionable[0]?.kind === 'left-folder',
 		});
 		if (choice === 'keep') return;
 		if (choice === 'delete') {
-			for (const item of batch) void this.deleteOnSite(item.apiPath, item.revision);
+			await this.trashConfirmed(actionable);
 			return;
 		}
-		const only = batch[0];
+		const only = actionable[0];
 		const prompt =
-			batch.length === 1 && only
+			actionable.length === 1 && only
 				? only.kind === 'left-folder'
 					? leftFolderPrompt(only.apiPath)
 					: siteDeletePrompt(only.apiPath)
-				: bulkDeletePrompt(batch.length);
+				: bulkDeletePrompt(actionable.length);
 		new SiteDeleteModal(this.app, prompt, (answer) => {
 			if (answer === 'delete') {
-				for (const item of batch) void this.deleteOnSite(item.apiPath, item.revision);
+				void this.trashConfirmed(actionable);
 				return;
 			}
 			this.notify(
-				batch.length === 1 && only
+				actionable.length === 1 && only
 					? `Left ${only.apiPath} on the site.`
-					: `Left ${batch.length} notes on the site.`,
+					: `Left ${actionable.length} notes on the site.`,
 			);
 		}).open();
+	}
+
+	private async dropAlreadyTrashed(
+		batch: { apiPath: string; revision: string; kind: 'deleted' | 'left-folder' }[],
+	): Promise<{ apiPath: string; revision: string; kind: 'deleted' | 'left-folder' }[]> {
+		let client: NotesClient;
+		try {
+			client = new NotesClient(this.http, this.settings.baseUrl, this.settings.apiToken);
+		} catch {
+			return batch;
+		}
+		const actionable: typeof batch = [];
+		let forgot = false;
+		for (const item of batch) {
+			const state = await this.probeSiteNote(client, item.apiPath);
+			if (state === 'trashed') {
+				this.forgetSynced(item.apiPath);
+				forgot = true;
+				continue;
+			}
+			actionable.push(item);
+		}
+		if (forgot) await this.saveSettings();
+		return actionable;
+	}
+
+	private async probeSiteNote(client: NotesClient, apiPath: string): Promise<'live' | 'trashed' | 'unknown'> {
+		try {
+			await client.get(apiPath);
+			return 'live';
+		} catch (error) {
+			if (probeSaysTrashed(error)) return 'trashed';
+			if (probeSaysMissing(error)) return 'unknown';
+			return 'unknown';
+		}
 	}
 
 	private async moveOnSite(
@@ -811,60 +889,182 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		fromApiPath: string,
 		toApiPath: string,
 		revision: string,
-	): Promise<string | null> {
-		let nextRevision: string | null = null;
-		await this.withClient(async (client) => {
-			try {
-				const note = await client.move(fromApiPath, toApiPath, revision);
-				await this.retargetSync(fromApiPath, toApiPath, note.revision, file.path);
-				nextRevision = note.revision;
+		options?: { quiet?: boolean },
+	): Promise<
+		| { status: 'ok'; revision: string }
+		| { status: 'rate-limited'; message: string }
+		| { status: 'failed'; message: string }
+	> {
+		let client: NotesClient;
+		try {
+			client = new NotesClient(this.http, this.settings.baseUrl, this.settings.apiToken);
+		} catch (error) {
+			const message = explainError(error);
+			if (!options?.quiet) this.notify(message, 8000);
+			return { status: 'failed', message };
+		}
+		try {
+			const note = await client.move(fromApiPath, toApiPath, revision);
+			await this.retargetSync(fromApiPath, toApiPath, note.revision, file.path);
+			if (!options?.quiet) {
 				this.notify(`Renamed ${fromApiPath} to ${toApiPath} on the site. The old link redirects.`);
-			} catch (error) {
-				if (error instanceof NotesApiError && error.code === 'moved' && error.location) {
-					await this.followMoved(fromApiPath, error.location, error.note?.revision);
-					const followed = canonicalApiPath(error.location);
-					nextRevision = followed ? (this.settings.synced[followed]?.revision ?? null) : null;
-					return;
-				}
-				if (error instanceof NotesApiError && (error.code === 'gone' || error.code === 'deleted')) {
-					this.offerRestore(fromApiPath, error.note?.revision ?? revision, error.message);
-					return;
-				}
-				throw error;
 			}
-		});
-		return nextRevision;
+			return { status: 'ok', revision: note.revision };
+		} catch (error) {
+			if (isRateLimited(error)) {
+				return { status: 'rate-limited', message: explainError(error) };
+			}
+			if (error instanceof NotesApiError && error.code === 'moved' && error.location) {
+				await this.followMoved(fromApiPath, error.location, error.note?.revision);
+				const followed = canonicalApiPath(error.location);
+				const next = followed ? this.settings.synced[followed]?.revision : undefined;
+				if (next) return { status: 'ok', revision: next };
+				return { status: 'failed', message: error.message };
+			}
+			if (error instanceof NotesApiError && shouldAdoptMove(error)) {
+				const adopted = await this.adoptExistingDestination(client, fromApiPath, toApiPath, file);
+				if (adopted) return { status: 'ok', revision: adopted };
+			}
+			if (error instanceof NotesApiError && (error.code === 'gone' || error.code === 'deleted')) {
+				this.offerRestore(fromApiPath, error.note?.revision ?? revision, error.message);
+				return { status: 'failed', message: error.message };
+			}
+			const message = explainError(error);
+			if (!options?.quiet) this.notify(message, 8000);
+			return { status: 'failed', message };
+		}
 	}
 
-	private async deleteOnSite(apiPath: string, revision: string): Promise<void> {
-		if (this.pendingSiteDeletes.has(apiPath)) return;
+	/** Another device already moved the note. A live note at the destination is success. */
+	private async adoptExistingDestination(
+		client: NotesClient,
+		fromApiPath: string,
+		toApiPath: string,
+		file: TFile,
+	): Promise<string | null> {
+		try {
+			const note = await client.get(toApiPath);
+			await this.retargetSync(fromApiPath, toApiPath, note.revision, file.path);
+			return note.revision;
+		} catch {
+			return null;
+		}
+	}
+
+	private async runFolderMoves(
+		jobs: { file: TFile; fromApiPath: string; toApiPath: string; revision: string }[],
+	): Promise<void> {
+		const run = await runUntilRateLimit(jobs, async (job) => {
+			if (!job.revision) return { failed: 'This device has no revision for that note.' };
+			const result = await this.moveOnSite(job.file, job.fromApiPath, job.toApiPath, job.revision, {
+				quiet: true,
+			});
+			if (result.status === 'ok') return 'ok';
+			if (result.status === 'rate-limited') return { rateLimited: result.message };
+			return { failed: result.message };
+		});
+		this.notify(
+			summarizeMoveRun({
+				moved: run.succeeded,
+				total: jobs.length,
+				failed: run.failed.map((item) => ({ apiPath: item.item.toApiPath, message: item.message })),
+				notFinished: run.notFinished.map((item) => item.toApiPath),
+				rateLimited: run.rateLimited,
+			}),
+			10000,
+		);
+	}
+
+	private async trashConfirmed(items: { apiPath: string; revision: string }[]): Promise<void> {
+		const trashed: string[] = [];
+		const run = await runUntilRateLimit(
+			items,
+			async (item) => {
+				const result = await this.deleteOnSiteNow(item.apiPath, item.revision);
+				if (result.status === 'ok') {
+					trashed.push(item.apiPath);
+					return 'ok';
+				}
+				if (result.status === 'rate-limited') return { rateLimited: result.message };
+				return { failed: result.message };
+			},
+			{ stopOnAnyFailure: true },
+		);
+		this.notify(
+			summarizeTrashRun({
+				trashed,
+				failed: run.failed.map((item) => ({ apiPath: item.item.apiPath, message: item.message })),
+				notFinished: run.notFinished.map((item) => item.apiPath),
+				rateLimited: run.rateLimited,
+			}),
+			10000,
+		);
+	}
+
+	private async deleteOnSiteNow(
+		apiPath: string,
+		revision: string,
+	): Promise<{ status: 'ok' } | { status: 'rate-limited'; message: string } | { status: 'failed'; message: string }> {
+		if (this.pendingSiteDeletes.has(apiPath)) {
+			return { status: 'failed', message: 'That note is already being deleted.' };
+		}
 		this.pendingSiteDeletes.add(apiPath);
 		try {
-			await this.deleteOnSiteNow(apiPath, revision);
+			let client: NotesClient;
+			try {
+				client = new NotesClient(this.http, this.settings.baseUrl, this.settings.apiToken);
+			} catch (error) {
+				return { status: 'failed', message: explainError(error) };
+			}
+			try {
+				await client.remove(apiPath, revision);
+				this.forgetSynced(apiPath);
+				await this.saveSettings();
+				return { status: 'ok' };
+			} catch (error) {
+				const movedTarget = error instanceof NotesApiError ? deleteTargetAfterMove(error, revision) : null;
+				if (movedTarget) {
+					const target = movedTarget.apiPath;
+					try {
+						await client.remove(target, movedTarget.revision);
+						this.forgetSynced(apiPath);
+						this.forgetSynced(target);
+						await this.saveSettings();
+						return { status: 'ok' };
+					} catch (followed) {
+						return this.classifyDeleteFailure(followed);
+					}
+				}
+				if (
+					error instanceof NotesApiError &&
+					(error.code === 'gone' ||
+						error.code === 'deleted' ||
+						error.code === 'not_found' ||
+						error.status === 404 ||
+						error.status === 410)
+				) {
+					this.forgetSynced(apiPath);
+					await this.saveSettings();
+					return { status: 'ok' };
+				}
+				return this.classifyDeleteFailure(error);
+			}
 		} finally {
 			this.pendingSiteDeletes.delete(apiPath);
 		}
 	}
 
-	private async deleteOnSiteNow(apiPath: string, revision: string): Promise<void> {
-		await this.withClient(async (client) => {
-			try {
-				await client.remove(apiPath, revision);
-			} catch (error) {
-				if (error instanceof NotesApiError && (error.code === 'gone' || error.code === 'deleted')) {
-					// Already in the trash.
-				} else if (error instanceof NotesApiError && error.code === 'revision_conflict') {
-					this.notify('The site copy changed, so it was not deleted.', 8000);
-					return;
-				} else {
-					throw error;
-				}
-			}
-			delete this.settings.synced[apiPath];
-			delete this.settings.conflictRevisions[apiPath];
-			await this.saveSettings();
-			this.notify(`Moved ${apiPath} to the site trash. It can be restored.`);
-		});
+	private classifyDeleteFailure(
+		error: unknown,
+	): { status: 'rate-limited'; message: string } | { status: 'failed'; message: string } {
+		const message = explainError(error);
+		if (isRateLimited(error)) return { status: 'rate-limited', message };
+		return { status: 'failed', message };
+	}
+
+	private forgetSynced(apiPath: string): void {
+		delete this.settings.synced[apiPath];
+		delete this.settings.conflictRevisions[apiPath];
 	}
 
 	private async followMoved(fromApiPath: string, location: string, revision: string | undefined): Promise<void> {
@@ -910,6 +1110,8 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 					this.remoteWrites.delete(toVault);
 				}, 1000);
 			}
+			// A publish was waiting on the old path. Run it against the file's new path.
+			this.debouncer.reschedule(fromVault, toVault);
 		} else if (fromFile instanceof TFile && toFile) {
 			this.notify(
 				`The site moved ${move.fromApiPath} to ${move.toApiPath}, and both files are already in the vault. Neither was overwritten.`,
@@ -973,61 +1175,42 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			const note = await client.restore(apiPath, revision);
 			const vaultPath = vaultPathForApi(this.settings.syncFolder, apiPath);
 			const existing = this.app.vault.getAbstractFileByPath(vaultPath);
-			const localContent = existing instanceof TFile ? await this.app.vault.read(existing) : undefined;
-			const syncedFingerprint = this.settings.synced[apiPath]?.fingerprint;
-			const plan = planRestore({
-				localExists: localContent !== undefined,
-				localFingerprint: localContent !== undefined ? contentFingerprint(localContent) : undefined,
-				syncedFingerprint,
-			});
-			if (plan === 'write-restored') {
-				const content =
-					localContent !== undefined ? preserveTelegramFrontmatter(localContent, note.content) : note.content;
-				await this.writeVaultFile(vaultPath, content);
-				this.settings.synced[apiPath] = {
-					revision: note.revision,
-					fingerprint: contentFingerprint(content),
-				};
-				await this.saveSettings();
-				this.notify(`Restored ${apiPath} from the site trash.`);
-				return;
-			}
-			// Local text changed since the last sync. Keep that file. Park the
-			// restored copy beside it, then publish the local text onto the
-			// revision restore just created.
+			const localContent = existing instanceof TFile ? await this.app.vault.read(existing) : null;
 			const siblings = this.siblingNames(vaultPath);
-			const conflictPath = nextConflictVaultPath(vaultPath, siblings);
-			await this.writeVaultFile(conflictPath, note.content);
-			const published = await publishNote(client, {
-				apiPath,
+			const outcome = await performRestore({
+				label: apiPath,
 				vaultPath,
-				content: localContent ?? '',
-				revision: note.revision,
-				siblingNames: siblings,
+				restoredContent: note.content,
+				restoredRevision: note.revision,
+				localContent,
+				syncedFingerprint: this.settings.synced[apiPath]?.fingerprint,
+				fingerprint: contentFingerprint,
+				preserve: preserveTelegramFrontmatter,
+				conflictPath: nextConflictVaultPath(vaultPath, siblings),
+				write: (path, content) => this.writeVaultFile(path, content),
+				publishLocal: async (content, restoredRevision) => {
+					const published = await publishNote(client, {
+						apiPath,
+						vaultPath,
+						content,
+						revision: restoredRevision,
+						siblingNames: siblings,
+					});
+					if (published.kind === 'published') {
+						return {
+							ok: true,
+							revision: published.revision,
+							fingerprint: published.fingerprint,
+						};
+					}
+					return { ok: false, message: published.message };
+				},
 			});
-			if (published.kind === 'published') {
-				this.settings.synced[apiPath] = {
-					revision: published.revision,
-					fingerprint: published.fingerprint,
-				};
-				delete this.settings.conflictRevisions[apiPath];
-				await this.saveSettings();
-				this.notify(
-					`Kept your edits in ${apiPath}. Saved the restored copy beside the note and published your text.`,
-					10000,
-				);
-				return;
-			}
-			this.settings.synced[apiPath] = {
-				revision: note.revision,
-				fingerprint: contentFingerprint(note.content),
-			};
-			this.settings.conflictRevisions[apiPath] = note.revision;
+			this.settings.synced[apiPath] = outcome.synced;
+			if (outcome.conflictRevision) this.settings.conflictRevisions[apiPath] = outcome.conflictRevision;
+			else delete this.settings.conflictRevisions[apiPath];
 			await this.saveSettings();
-			this.notify(
-				`Restored ${apiPath} on the site, kept your local edits, and saved the site copy beside the note. ${published.kind === 'blocked' || published.kind === 'conflict' || published.kind === 'error' ? published.message : ''}`,
-				10000,
-			);
+			this.notify(outcome.notice, outcome.wroteOriginal ? 5000 : 10000);
 		});
 	}
 
