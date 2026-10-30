@@ -65,6 +65,7 @@ import {
 	performRestore,
 	planVaultRename,
 	runUntilRateLimit,
+	deleteTargetAfterMove,
 	probeSaysMissing,
 	probeSaysTrashed,
 	shouldAdoptMove,
@@ -976,15 +977,19 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 
 	private async trashConfirmed(items: { apiPath: string; revision: string }[]): Promise<void> {
 		const trashed: string[] = [];
-		const run = await runUntilRateLimit(items, async (item) => {
-			const result = await this.deleteOnSiteNow(item.apiPath, item.revision);
-			if (result.status === 'ok') {
-				trashed.push(item.apiPath);
-				return 'ok';
-			}
-			if (result.status === 'rate-limited') return { rateLimited: result.message };
-			return { failed: result.message };
-		});
+		const run = await runUntilRateLimit(
+			items,
+			async (item) => {
+				const result = await this.deleteOnSiteNow(item.apiPath, item.revision);
+				if (result.status === 'ok') {
+					trashed.push(item.apiPath);
+					return 'ok';
+				}
+				if (result.status === 'rate-limited') return { rateLimited: result.message };
+				return { failed: result.message };
+			},
+			{ stopOnAnyFailure: true },
+		);
 		this.notify(
 			summarizeTrashRun({
 				trashed,
@@ -1017,11 +1022,11 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 				await this.saveSettings();
 				return { status: 'ok' };
 			} catch (error) {
-				if (error instanceof NotesApiError && error.code === 'moved' && error.location) {
-					const target = canonicalApiPath(error.location);
-					if (!target) return { status: 'failed', message: error.message };
+				const movedTarget = error instanceof NotesApiError ? deleteTargetAfterMove(error, revision) : null;
+				if (movedTarget) {
+					const target = movedTarget.apiPath;
 					try {
-						await client.remove(target, error.note?.revision ?? revision);
+						await client.remove(target, movedTarget.revision);
 						this.forgetSynced(apiPath);
 						this.forgetSynced(target);
 						await this.saveSettings();

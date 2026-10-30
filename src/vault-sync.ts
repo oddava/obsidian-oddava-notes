@@ -158,13 +158,11 @@ export function summarizeTrashRun(result: TrashRun): string {
 	}
 	const parts = [`Trashed ${result.trashed.length} of ${total}.`];
 	if (result.rateLimited) parts.push('Stopped because the site is rate limiting.');
-	if (result.failed.length > 0) {
-		const details = result.failed.map((item) => `${item.apiPath} (${item.message})`).join('; ');
-		parts.push(`Failed: ${details}.`);
-	}
-	if (result.notFinished.length > 0) {
-		parts.push(`Not finished: ${result.notFinished.join(', ')}.`);
-	}
+	const left = [
+		...result.failed.map((item) => `${item.apiPath} (${item.message})`),
+		...result.notFinished,
+	];
+	if (left.length > 0) parts.push(`Left: ${left.join(', ')}.`);
 	if (result.trashed.length > 0) parts.push('Trashed notes can be restored.');
 	return parts.join(' ');
 }
@@ -214,6 +212,7 @@ export function isRateLimitFailure(error: unknown): boolean {
 export async function runUntilRateLimit<T>(
 	items: readonly T[],
 	step: (item: T) => Promise<'ok' | { rateLimited: string } | { failed: string }>,
+	options?: { stopOnAnyFailure?: boolean },
 ): Promise<{
 	succeeded: number;
 	failed: { item: T; message: string }[];
@@ -235,6 +234,14 @@ export async function runUntilRateLimit<T>(
 			};
 		}
 		failed.push({ item, message: result.failed });
+		if (options?.stopOnAnyFailure) {
+			return {
+				succeeded: index - failed.length + 1,
+				failed,
+				notFinished: items.slice(index + 1),
+				rateLimited: false,
+			};
+		}
 	}
 	return {
 		succeeded: items.length - failed.length,
@@ -242,6 +249,17 @@ export async function runUntilRateLimit<T>(
 		notFinished: [],
 		rateLimited: false,
 	};
+}
+
+/** Where a delete should go after the site says the note moved. */
+export function deleteTargetAfterMove(
+	error: NotesApiError,
+	fallbackRevision: string,
+): { apiPath: string; revision: string } | null {
+	if (error.code !== 'moved' || !error.location) return null;
+	const apiPath = canonicalApiPath(error.location);
+	if (!apiPath) return null;
+	return { apiPath, revision: error.note?.revision ?? fallbackRevision };
 }
 
 export async function performRestore(input: {

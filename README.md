@@ -170,7 +170,7 @@ If another device already renamed the note, a move that comes back `404` or “t
 Deleting a synced note in the vault does not delete it on the site by itself. **When a note is deleted** chooses:
 
 - **Ask** (the default). A dialog offers **Delete on site too** and **Keep on site**.
-- **Always delete on the site.** One note you delete goes to the trash without a dialog. This also applies to a delete made by a sync tool. Deletes that arrive within about a second are one batch, so a sync tool removing notes one by one still asks once. Deleting several notes at once, including a folder, still asks first. Confirmed deletes run one at a time and stop if the site rate-limits, then report how many were trashed.
+- **Always delete on the site.** One note you delete goes to the trash without a dialog. This also applies to a delete made by a sync tool. Deletes that arrive within about a second are one batch, so a sync tool removing notes one by one still asks once. Deleting several notes at once, including a folder, still asks first. Confirmed deletes run one at a time and stop on the first error, including rate limiting, then report how many were trashed and which notes were left.
 - **Keep on the site.** The garden keeps the note. The next pull can download it again.
 
 If the vault file changed since the last sync, **Restore** does not overwrite it. The trash copy is saved beside the note, and your text is published onto the revision the restore just created.

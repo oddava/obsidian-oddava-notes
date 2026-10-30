@@ -11,6 +11,7 @@ import {
 	bulkDeletePrompt,
 	createMoveChain,
 	createRestartingBatcher,
+	deleteTargetAfterMove,
 	leftFolderPrompt,
 	performRestore,
 	probeSaysTrashed,
@@ -459,10 +460,26 @@ describe('delete batch window', () => {
 			summarizeTrashRun({
 				trashed: ['a.md'],
 				failed: [{ apiPath: 'b.md', message: 'busy' }],
-				notFinished: [],
+				notFinished: ['c.md'],
 				rateLimited: false,
 			}),
-		).toMatch(/Failed: b.md \(busy\)/);
+		).toMatch(/Left: b.md \(busy\), c.md/);
+	});
+
+	it('stops the rest of a confirmed delete when any note fails', async () => {
+		const calls: string[] = [];
+		const run = await runUntilRateLimit(
+			['a.md', 'b.md', 'c.md'],
+			async (apiPath) => {
+				calls.push(apiPath);
+				if (apiPath === 'b.md') return { failed: 'The site copy changed, so it was not deleted.' };
+				return 'ok';
+			},
+			{ stopOnAnyFailure: true },
+		);
+		expect(calls).toEqual(['a.md', 'b.md']);
+		expect(run.notFinished).toEqual(['c.md']);
+		expect(run.failed.map((item) => item.item)).toEqual(['b.md']);
 	});
 });
 
@@ -514,6 +531,28 @@ describe('second device already moved the note', () => {
 		expect(probeSaysTrashed(toApiError({ status: 410, headers: {}, body: { code: 'gone', error: 'x' } }))).toBe(
 			true,
 		);
+	});
+
+	it('follows a 409 moved delete to the note’s new path', () => {
+		const target = deleteTargetAfterMove(
+			toApiError({
+				status: 409,
+				headers: {},
+				body: {
+					code: 'moved',
+					location: 'reading/hello.md',
+					error: 'moved',
+					note: {
+						path: 'reading/hello.md',
+						title: 'hello',
+						updated: '2026-10-30T00:00:00.000Z',
+						revision: 'r8',
+					},
+				},
+			}),
+			'r1',
+		);
+		expect(target).toEqual({ apiPath: 'reading/hello.md', revision: 'r8' });
 	});
 });
 
