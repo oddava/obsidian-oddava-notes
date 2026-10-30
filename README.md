@@ -63,7 +63,7 @@ You can pin **Publish current note**, **Pull notes from site**, and **Post curre
 - **Publish and post to Telegram.** Publishes the open note, then opens that same confirmation.
 - **Test connection.** The settings tab lists how many notes the site currently has.
 
-There is no delete. Removing a note stays in Studio on the site.
+Removing a note in the vault does not delete it on the site until you say so. See [Renames and deletes](#renames-and-deletes). Studio can still remove a note on its own.
 
 ## Settings
 
@@ -77,6 +77,7 @@ There is no delete. Removing a note stays in Studio on the site.
 | Auto-pull interval | 5 minutes | At least 1 minute between pulls. |
 | Telegram bot token | empty | From @BotFather. Masked. The bot must be a channel admin. |
 | Telegram channel | `@justoddava` | Where posts go. A `@channel` or a numeric id. |
+| When a note is deleted | Ask | Delete on the site, keep it, or ask. Site deletes go to the trash. |
 
 `oddava.me/diary/hello.md` in the vault is `diary/hello.md` on the site. Every folder and file name under the sync folder has to be lowercase kebab-case (`reading/atomic-habits.md`, `diary/06-10-2026.md`). Spaces, capitals, and underscores are rejected before a request is sent. That is the same rule the API uses.
 
@@ -95,7 +96,7 @@ The message is the title in bold, a short plain-text excerpt, and the public URL
 
 The channel message id is stored in the note as `telegram_message_id`. The site drops that key (it only keeps title, icon, order, and updated), so a pull copies it back onto the site text. The note body is what revisions compare, so the id does not look like a different essay. Other devices that share the vault see the same id.
 
-`telegram: true` in the frontmatter opts that note in. A manual **Publish current note** (the command or the ribbon) then posts it after a successful publish, if the note has at least 40 characters of text once frontmatter and Markdown are stripped, and no message id yet. A shorter note is skipped with a short notice. **Publish on save** never posts and never edits the channel, because it runs while you are still typing.
+`telegram: true` in the frontmatter opts that note in. A manual **Publish current note** (the command or the ribbon) then posts it after a successful publish, if the note has at least 40 characters of text once frontmatter and Markdown are stripped, and no message id yet. That first post does not show the confirmation preview. Skipping the preview is on purpose: the flag plus the publish is the request, and the preview stays on **Post current note to Telegram** and **Publish and post to Telegram**. A shorter note is skipped with a short notice. **Publish on save** never posts and never edits the channel, because it runs while you are still typing.
 
 Publishing a note that already has `telegram_message_id` updates that channel post when the text changed. If Telegram says the text is unchanged, that counts as success. If the channel post was deleted, the plugin tells you and leaves the id in place so you can send a new one on purpose. **Post current note to Telegram** on a note that was already posted offers **Update existing** and **Post new**.
 
@@ -156,7 +157,23 @@ An automatic pull does not start while another pull is already running. The next
 
 No notice when every note was already in sync, or when local edits were left unpublished. A short notice when at least one note was downloaded or a conflict file was written. The same failure is not announced again on later intervals. It is announced again after a pull succeeds, so a new outage is not silent forever. With no token, or no site URL, automatic pull does nothing and shows nothing.
 
-Deleting a note in the vault does not delete it on the site. The next pull downloads it again. Delete from Studio if it should leave the garden.
+A note that is in the site trash is not downloaded again. If you left it on the site, the next pull brings it back into the sync folder.
+
+## Renames and deletes
+
+Renaming a note inside the sync folder calls `POST /api/notes/move` with the revision this device remembers. The old public URL redirects to the new one. The vault file has already moved; the plugin tells the site to follow it.
+
+Moving a note out of the sync folder is treated like a delete: the file stays where you put it, and the plugin asks what to do with the site copy. Moving a note into the sync folder is a new note. It is published only when **Publish on save** is on, the same as creating a file there.
+
+Deleting a synced note in the vault does not delete it on the site by itself. **When a note is deleted** chooses:
+
+- **Ask** (the default). A dialog offers **Delete on site too** and **Keep on site**.
+- **Always delete on the site.** The site copy goes to the trash without a dialog.
+- **Keep on the site.** The garden keeps the note. The next pull can download it again.
+
+A site delete is soft. The note leaves the garden and stays in the trash, and it can be restored. The list endpoint returns those notes in `deleted`, separate from `notes`. Pull does not recreate a note that is in that trash. If you had it synced, the plugin stops tracking it and says it was left in the trash.
+
+If the site renamed a note (Studio, or another device), pull follows `409 moved` and `location`: it renames the vault file when the destination is free and points the remembered revision at the new path. `410 gone` means the note is in the trash. The notice offers **Restore**, which calls `POST /api/notes/restore`. `409 deleted` means a trashed note still holds that path, so create and move will not overwrite it. Restore it, or pick another path. Those three are not reported as a bare HTTP status.
 
 ## Frontmatter
 
@@ -188,7 +205,7 @@ npm run build
 
 `npm run dev` watches and rebuilds while you work.
 
-`npm version 1.0.2` runs `version-bump.mjs` (also `npm run version-bump`), which writes that version into `manifest.json` and `versions.json`. Push a tag with the same number and no `v` prefix (`1.0.2`, not `v1.0.2`). The release workflow checks the tag against the manifest, then publishes `main.js`, `manifest.json`, and `styles.css`.
+`npm version 1.0.3` runs `version-bump.mjs` (also `npm run version-bump`), which writes that version into `manifest.json` and `versions.json`. Push a tag with the same number and no `v` prefix (`1.0.3`, not `v1.0.3`). The release workflow checks the tag against the manifest, then publishes `main.js`, `manifest.json`, and `styles.css`.
 
 The layout follows the official sample plugin: `src/main.ts`, `esbuild.config.mjs`, `manifest.json`, `versions.json`, `styles.css`, `version-bump.mjs`.
 

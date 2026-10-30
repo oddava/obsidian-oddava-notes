@@ -8,6 +8,7 @@ import {
 	readUpdated,
 } from './frontmatter';
 import { explainError, conflictSavedMessage, blockedConflictMessage, slugConflictMessage } from './messages';
+import { canonicalApiPath, planRemoteReconcile, type RemoteMove } from './vault-sync';
 import {
 	hasOpenConflict,
 	nextConflictVaultPath,
@@ -15,7 +16,7 @@ import {
 	vaultDirectory,
 	vaultBasename,
 } from './paths';
-import type { NoteRecord, NoteSummary } from './types';
+import type { DeletedNoteSummary, NoteRecord, NoteSummary } from './types';
 
 /**
  * Publish and pull, with no Obsidian and no HTTP of their own.
@@ -60,7 +61,13 @@ export type PublishResult =
 			message: string;
 	  }
 	| { kind: 'blocked'; message: string }
-	| { kind: 'error'; message: string };
+	| {
+			kind: 'error';
+			message: string;
+			code?: string;
+			location?: string;
+			revision?: string;
+	  };
 
 export interface LocalNote {
 	vaultPath: string;
@@ -111,6 +118,10 @@ export interface PullResult {
 	aligned: AlignedNote[];
 	conflicts: PullConflict[];
 	skipped: PullSkip[];
+	/** Every trashed path from this list. Pull does not download these. */
+	deletedPaths?: string[];
+	/** Paths we stopped tracking because they are in the trash. */
+	trashed?: string[];
 	stoppedEarly?: string;
 }
 
@@ -128,8 +139,21 @@ export async function publishNote(client: NotesClient, input: PublishInput): Pro
 		}
 		return await createOrAdopt(client, input);
 	} catch (error) {
-		return { kind: 'error', message: explainError(error) };
+		return publishFailure(error);
 	}
+}
+
+function publishFailure(error: unknown): PublishResult {
+	if (error instanceof NotesApiError) {
+		return {
+			kind: 'error',
+			message: error.message,
+			code: error.code,
+			location: error.location,
+			revision: error.note?.revision,
+		};
+	}
+	return { kind: 'error', message: explainError(error) };
 }
 
 export function decideWithoutBody(local: LocalNote, summary: NoteSummary): PullDecision {
@@ -179,15 +203,31 @@ export function decideWithBody(local: LocalNote, note: NoteRecord): PullDecision
 export async function pullFromSite(
 	client: NotesClient,
 	readLocal: (apiPath: string) => Promise<LocalNote> | LocalNote,
+	preset?: { notes: NoteSummary[]; deleted?: DeletedNoteSummary[] },
 ): Promise<PullResult> {
 	const result: PullResult = { downloaded: [], aligned: [], conflicts: [], skipped: [] };
 	let notes: NoteSummary[];
+	let deleted: DeletedNoteSummary[] = [];
 	try {
-		notes = await client.list();
+		if (preset) {
+			notes = preset.notes;
+			deleted = preset.deleted ?? [];
+		} else {
+			const garden = await loadGarden(client);
+			notes = garden.notes;
+			deleted = garden.deleted;
+		}
 	} catch (error) {
 		result.stoppedEarly = explainError(error);
 		return result;
 	}
+
+	const trashed = new Set<string>();
+	for (const entry of deleted) {
+		const parsed = parseApiPath(entry.path);
+		if (parsed.ok) trashed.add(parsed.apiPath);
+	}
+	result.deletedPaths = [...trashed];
 
 	const reserved = new Map<string, Set<string>>();
 
@@ -198,6 +238,10 @@ export async function pullFromSite(
 			continue;
 		}
 		const apiPath = parsed.apiPath;
+		if (trashed.has(apiPath)) {
+			result.skipped.push({ apiPath, reason: 'The note is in the site trash.' });
+			continue;
+		}
 
 		let local: LocalNote;
 		try {
@@ -270,12 +314,62 @@ export function summarizePull(result: PullResult): string {
 			`Left ${result.skipped.length} ${result.skipped.length === 1 ? 'note' : 'notes'} in the vault unchanged.`,
 		);
 	}
+	if ((result.trashed ?? []).length > 0) {
+		const count = result.trashed?.length ?? 0;
+		parts.push(`Left ${count} ${count === 1 ? 'note' : 'notes'} in the site trash.`);
+	}
 	if (result.stoppedEarly) parts.push(result.stoppedEarly);
 	if (parts.length > 0) return parts.join(' ');
 	if (result.aligned.length > 0) {
 		return `Already up to date (${result.aligned.length} ${result.aligned.length === 1 ? 'note' : 'notes'}).`;
 	}
 	return 'The site has no notes yet.';
+}
+
+export type { RemoteMove };
+
+export async function findRemoteMoves(
+	client: NotesClient,
+	knownPaths: readonly string[],
+	livePaths: readonly string[],
+	deletedPaths: readonly string[],
+): Promise<{ moves: RemoteMove[]; gone: string[]; stoppedEarly?: string }> {
+	const plan = planRemoteReconcile(knownPaths, livePaths, deletedPaths);
+	const moves: RemoteMove[] = [];
+	const gone = [...plan.gone];
+	for (const path of plan.probe) {
+		try {
+			await client.get(path);
+		} catch (error) {
+			if (isFatalApiError(error)) {
+				return { moves, gone, stoppedEarly: explainError(error) };
+			}
+			if (!(error instanceof NotesApiError)) {
+				return { moves, gone, stoppedEarly: explainError(error) };
+			}
+			if (error.code === 'moved' && error.location) {
+				const target = canonicalApiPath(error.location);
+				if (!target) continue;
+				if (deletedPaths.includes(target)) {
+					gone.push(path);
+					continue;
+				}
+				moves.push({ fromApiPath: path, toApiPath: target, revision: error.note?.revision });
+				continue;
+			}
+			if (error.code === 'gone' || error.status === 410) {
+				gone.push(path);
+			}
+		}
+	}
+	return { moves, gone };
+}
+
+async function loadGarden(
+	client: NotesClient,
+): Promise<{ notes: NoteSummary[]; deleted: DeletedNoteSummary[] }> {
+	if (typeof client.listGarden === 'function') return client.listGarden();
+	return { notes: await client.list(), deleted: [] };
 }
 
 export async function testConnection(client: NotesClient): Promise<string> {

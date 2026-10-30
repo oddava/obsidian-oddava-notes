@@ -1,6 +1,6 @@
 {
 	"name": "oddava-notes",
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"description": "Publish and sync Obsidian notes with oddava.me.",
 	"main": "main.js",
 	"type": "module",

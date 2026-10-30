@@ -5,6 +5,8 @@ export class NotesApiError extends Error {
 	readonly code?: string;
 	readonly note?: NoteSummary;
 	readonly retryAfter?: string;
+	/** Set on `409 moved`: the note's current path. */
+	readonly location?: string;
 
 	constructor(
 		status: number,
@@ -12,6 +14,7 @@ export class NotesApiError extends Error {
 		code?: string,
 		note?: NoteSummary,
 		retryAfter?: string,
+		location?: string,
 	) {
 		super(message);
 		this.name = 'NotesApiError';
@@ -19,6 +22,7 @@ export class NotesApiError extends Error {
 		this.code = code;
 		this.note = note;
 		this.retryAfter = retryAfter;
+		this.location = location;
 	}
 }
 

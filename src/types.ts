@@ -11,8 +11,13 @@ export interface NoteRecord extends NoteSummary {
 	content: string;
 }
 
+/** A trashed note from `GET /api/notes` `deleted`, or a delete response. */
+export interface DeletedNoteSummary extends NoteSummary {
+	deletedAt?: string;
+}
+
 export interface HttpRequest {
-	method: 'GET' | 'POST' | 'PUT';
+	method: 'GET' | 'POST' | 'PUT' | 'DELETE';
 	url: string;
 	headers: Record<string, string>;
 	body?: string;
