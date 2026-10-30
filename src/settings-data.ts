@@ -1,4 +1,5 @@
 import { DEFAULT_TELEGRAM_CHANNEL, normalizeTelegramChannel } from './telegram';
+import { siteDeleteSetting, type SiteDeleteSetting } from './vault-sync';
 
 /** Floor so a pull cannot loop inside the site's 120 requests/minute limit. */
 export const MIN_AUTO_PULL_MINUTES = 1;
@@ -37,6 +38,11 @@ export interface OddavaSettings {
 	telegramBotToken: string;
 	/** Channel username or numeric id. Posts remember their id in the note. */
 	telegramChannel: string;
+	/**
+	 * What to do on the site when a synced note leaves the vault.
+	 * Deletes on the site are soft: the note goes to the trash and can be restored.
+	 */
+	siteDelete: SiteDeleteSetting;
 }
 
 export function defaultSettings(): OddavaSettings {
@@ -51,6 +57,7 @@ export function defaultSettings(): OddavaSettings {
 		conflictRevisions: {},
 		telegramBotToken: '',
 		telegramChannel: DEFAULT_TELEGRAM_CHANNEL,
+		siteDelete: 'ask',
 	};
 }
 
@@ -76,6 +83,7 @@ export function mergeSettings(stored: unknown): OddavaSettings {
 		telegramChannel:
 			normalizeTelegramChannel(typeof stored.telegramChannel === 'string' ? stored.telegramChannel : '') ??
 			defaults.telegramChannel,
+		siteDelete: siteDeleteSetting(stored.siteDelete),
 	};
 }
 

@@ -7,6 +7,7 @@ import {
 	type OddavaSettings,
 } from './settings-data';
 import { DEFAULT_TELEGRAM_CHANNEL, normalizeTelegramChannel } from './telegram';
+import { siteDeleteSetting } from './vault-sync';
 
 export interface OddavaHost {
 	settings: OddavaSettings;
@@ -92,6 +93,23 @@ export class OddavaSettingTab extends PluginSettingTab {
 					this.plugin.settings.syncFolder = value.trim();
 					await this.plugin.saveSettings();
 				});
+			});
+
+		new Setting(containerEl)
+			.setName('When a note is deleted')
+			.setDesc(
+				'When you delete one synced note. Always also applies to deletes made by a sync tool. Moving a note out of the sync folder always asks, and deleting several notes at once always asks. Deleting on the site moves them to the trash, and they can be restored.',
+			)
+			.addDropdown((dropdown) => {
+				dropdown
+					.addOption('ask', 'Ask')
+					.addOption('always', 'Always delete on the site')
+					.addOption('never', 'Keep on the site')
+					.setValue(this.plugin.settings.siteDelete)
+					.onChange(async (value) => {
+						this.plugin.settings.siteDelete = siteDeleteSetting(value);
+						await this.plugin.saveSettings();
+					});
 			});
 
 		new Setting(containerEl)

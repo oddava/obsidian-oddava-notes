@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { contentFingerprint } from './fingerprint';
 import { noteBodiesMatch, preserveTelegramFrontmatter, readTelegramFrontmatter, upsertFrontmatter } from './frontmatter';
@@ -60,6 +61,21 @@ describe('telegram post text', () => {
 		);
 		expect(prepared.draft.plain).toBe(plainPost(prepared.draft.title, prepared.draft.excerpt, prepared.draft.url));
 		expect(prepared.draft.html).not.toContain('icon');
+	});
+
+	it('does not treat a missing revision as published', () => {
+		const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
+		expect(source).not.toMatch(/['"]pending['"]/);
+		expect(source).toMatch(/Do not substitute a placeholder/);
+		const missing = prepareTelegramPost({
+			vaultPath: `${folder}/diary/hello.md`,
+			syncFolder: folder,
+			content: `# Hello\n\n${long}\n`,
+			baseUrl: 'https://oddava.me',
+			channel: '@justoddava',
+			publishedRevision: '',
+		});
+		expect(missing.ok).toBe(false);
 	});
 
 	it('refuses a note outside the sync folder or not published yet', () => {

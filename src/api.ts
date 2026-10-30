@@ -1,7 +1,7 @@
 import { NotesApiError } from './errors';
 import { failureMessage } from './messages';
 import { parseApiPath } from './paths';
-import type { HttpClient, HttpResponse, NoteRecord, NoteSummary } from './types';
+import type { DeletedNoteSummary, HttpClient, HttpResponse, NoteRecord, NoteSummary } from './types';
 
 /** Same cap as the notes API: the JSON body, not just the Markdown. */
 export const MAX_NOTES_API_BYTES = 1024 * 1024;
@@ -70,6 +70,11 @@ export class NotesClient {
 	}
 
 	list(): Promise<NoteSummary[]> {
+		return this.listGarden().then((garden) => garden.notes);
+	}
+
+	/** Live notes plus the trash. A missing `deleted` array means an older server. */
+	listGarden(): Promise<{ notes: NoteSummary[]; deleted: DeletedNoteSummary[] }> {
 		return this.request('GET', notesCollectionUrl(this.baseUrl), undefined, (body) => {
 			if (!isRecord(body) || !Array.isArray(body.notes)) {
 				throw new NotesApiError(
@@ -78,16 +83,10 @@ export class NotesClient {
 					'invalid_response',
 				);
 			}
-			return body.notes.map((entry) => {
-				if (!isNoteSummary(entry)) {
-					throw new NotesApiError(
-						200,
-						failureMessage(200, 'invalid_response', undefined, []),
-						'invalid_response',
-					);
-				}
-				return entry;
-			});
+			return {
+				notes: body.notes.map((entry) => readSummary(entry)),
+				deleted: Array.isArray(body.deleted) ? body.deleted.map((entry) => readDeleted(entry)) : [],
+			};
 		});
 	}
 
@@ -108,6 +107,40 @@ export class NotesClient {
 		);
 	}
 
+	async move(from: string, to: string, revision?: string): Promise<NoteRecord> {
+		const source = this.safePath(from);
+		const target = this.safePath(to);
+		const payload: { from: string; to: string; revision?: string } = { from: source, to: target };
+		if (revision) payload.revision = revision;
+		return this.request('POST', `${notesCollectionUrl(this.baseUrl)}/move`, payload, (body) =>
+			readNote(body),
+		);
+	}
+
+	async remove(apiPath: string, revision?: string): Promise<DeletedNoteSummary> {
+		const path = this.safePath(apiPath);
+		const payload = revision ? { revision } : undefined;
+		return this.request('DELETE', noteResourceUrl(this.baseUrl, path), payload, (body) => {
+			if (!isRecord(body)) {
+				throw new NotesApiError(
+					200,
+					failureMessage(200, 'invalid_response', undefined, []),
+					'invalid_response',
+				);
+			}
+			return readDeleted(body.note);
+		});
+	}
+
+	async restore(apiPath: string, revision?: string): Promise<NoteRecord> {
+		const path = this.safePath(apiPath);
+		const payload: { path: string; revision?: string } = { path };
+		if (revision) payload.revision = revision;
+		return this.request('POST', `${notesCollectionUrl(this.baseUrl)}/restore`, payload, (body) =>
+			readNote(body),
+		);
+	}
+
 	async update(apiPath: string, content: string, revision: string | undefined): Promise<NoteRecord> {
 		const path = this.safePath(apiPath);
 		const payload: { content: string; revision?: string } = { content };
@@ -124,7 +157,7 @@ export class NotesClient {
 	}
 
 	private async request<T>(
-		method: 'GET' | 'POST' | 'PUT',
+		method: 'GET' | 'POST' | 'PUT' | 'DELETE',
 		url: string,
 		payload: unknown,
 		read: (body: unknown) => T,
@@ -150,13 +183,11 @@ export function toApiError(response: HttpResponse): NotesApiError {
 	const failure = readFailure(response.body);
 	const retryAfter = header(response.headers, 'retry-after');
 	const code = failure.code ?? (response.status === 401 ? 'unauthorized' : undefined);
-	return new NotesApiError(
-		response.status,
-		failureMessage(response.status, code, retryAfter, failure.fields),
-		code,
-		failure.note,
-		retryAfter,
-	);
+	let message = failureMessage(response.status, code, retryAfter, failure.fields);
+	if (code === 'moved' && failure.location) {
+		message = `${message} It is now at ${failure.location}.`;
+	}
+	return new NotesApiError(response.status, message, code, failure.note, retryAfter, failure.location);
 }
 
 function readNote(body: unknown): NoteRecord {
@@ -170,10 +201,33 @@ function readNote(body: unknown): NoteRecord {
 	return body.note;
 }
 
-function readFailure(body: unknown): { code?: string; note?: NoteSummary; fields: string[] } {
+function readSummary(entry: unknown): NoteSummary {
+	if (!isNoteSummary(entry)) {
+		throw new NotesApiError(
+			200,
+			failureMessage(200, 'invalid_response', undefined, []),
+			'invalid_response',
+		);
+	}
+	return entry;
+}
+
+function readDeleted(entry: unknown): DeletedNoteSummary {
+	const summary = readSummary(entry);
+	const deletedAt = isRecord(entry) && typeof entry.deletedAt === 'string' ? entry.deletedAt : undefined;
+	return deletedAt ? { ...summary, deletedAt } : summary;
+}
+
+function readFailure(body: unknown): {
+	code?: string;
+	note?: NoteSummary;
+	fields: string[];
+	location?: string;
+} {
 	if (!isRecord(body)) return { fields: [] };
 	const code = typeof body.code === 'string' ? body.code : undefined;
 	const note = isNoteSummary(body.note) ? body.note : undefined;
+	const location = typeof body.location === 'string' ? body.location : undefined;
 	const fields: string[] = [];
 	if (Array.isArray(body.issues)) {
 		for (const issue of body.issues) {
@@ -184,7 +238,7 @@ function readFailure(body: unknown): { code?: string; note?: NoteSummary; fields
 			if (path.length > 0) fields.push(path.join('.'));
 		}
 	}
-	return { code, note, fields };
+	return { code, note, fields, location };
 }
 
 function header(headers: Record<string, string>, name: string): string | undefined {

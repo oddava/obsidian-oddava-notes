@@ -17,6 +17,7 @@ describe('mergeSettings', () => {
 		expect(settings.apiToken).toBe('');
 		expect(settings.telegramBotToken).toBe('');
 		expect(settings.telegramChannel).toBe('@justoddava');
+		expect(settings.siteDelete).toBe('ask');
 	});
 
 	it('keeps an explicit auto-pull choice and raises a too-small interval', () => {
@@ -25,6 +26,9 @@ describe('mergeSettings', () => {
 			autoPullIntervalMinutes: 0,
 		});
 		expect(settings.autoPull).toBe(false);
+		expect(mergeSettings({ siteDelete: 'never' }).siteDelete).toBe('never');
+		expect(mergeSettings({ siteDelete: 'always' }).siteDelete).toBe('always');
+		expect(mergeSettings({ siteDelete: 'later' }).siteDelete).toBe('ask');
 		expect(settings.autoPullIntervalMinutes).toBe(MIN_AUTO_PULL_MINUTES);
 		expect(clampAutoPullMinutes('12')).toBe(12);
 		expect(clampAutoPullMinutes('nope')).toBe(5);
