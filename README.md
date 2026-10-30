@@ -4,6 +4,30 @@ An Obsidian plugin that publishes Markdown notes from a vault folder to [oddava.
 
 The site already stores the garden. This plugin is a client for the notes API: a bearer token, a path, and a revision.
 
+## Screenshots
+
+Shot on Android. Oddava Notes works in Obsidian mobile.
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/obsidian-and-site.jpg" width="220" alt="Split screen of the knowledge note on oddava.me and the same note open in Obsidian">
+      <br>
+      The note on the site and in Obsidian
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/command-palette.jpg" width="220" alt="Command palette filtered to oddava, with Publish current note and Pull notes from site">
+      <br>
+      Publish and pull
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/settings.jpg" width="220" alt="Oddava Notes settings with the API token masked and Pull automatically on">
+      <br>
+      Settings on the phone
+    </td>
+  </tr>
+</table>
+
 ## Install in 1 minute
 
 1. In Obsidian, install **BRAT** from Community plugins (Settings → Community plugins → Browse → BRAT). Enable it.
