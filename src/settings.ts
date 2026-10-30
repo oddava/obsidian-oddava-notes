@@ -98,7 +98,7 @@ export class OddavaSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('When a note is deleted')
 			.setDesc(
-				'A synced note removed from the vault, or moved out of the sync folder. Deleting on the site moves it to the trash. It can be restored.',
+				'When you delete one synced note. Always also applies to deletes made by a sync tool. Moving a note out of the sync folder always asks, and deleting several notes at once always asks. Deleting on the site moves them to the trash, and they can be restored.',
 			)
 			.addDropdown((dropdown) => {
 				dropdown

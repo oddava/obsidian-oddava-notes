@@ -163,13 +163,15 @@ A note that is in the site trash is not downloaded again. If you left it on the 
 
 Renaming a note inside the sync folder calls `POST /api/notes/move` with the revision this device remembers. The old public URL redirects to the new one. The vault file has already moved; the plugin tells the site to follow it.
 
-Moving a note out of the sync folder is treated like a delete: the file stays where you put it, and the plugin asks what to do with the site copy. Moving a note into the sync folder is a new note. It is published only when **Publish on save** is on, the same as creating a file there.
+Moving a note out of the sync folder is treated like a delete: the file stays where you put it, and the plugin always asks what to do with the site copy, even when **When a note is deleted** is set to always. Moving a note into the sync folder is a new note. It is published only when **Publish on save** is on, the same as creating a file there. A quick series of renames is sent in order, each one using the revision from the move before it.
 
 Deleting a synced note in the vault does not delete it on the site by itself. **When a note is deleted** chooses:
 
 - **Ask** (the default). A dialog offers **Delete on site too** and **Keep on site**.
-- **Always delete on the site.** The site copy goes to the trash without a dialog.
+- **Always delete on the site.** One note you delete goes to the trash without a dialog. This also applies to a delete made by a sync tool. Deleting several notes at once, including a folder, still asks first.
 - **Keep on the site.** The garden keeps the note. The next pull can download it again.
+
+If the vault file changed since the last sync, **Restore** does not overwrite it. The trash copy is saved beside the note, and your text is published onto the revision the restore just created.
 
 A site delete is soft. The note leaves the garden and stays in the trash, and it can be restored. The list endpoint returns those notes in `deleted`, separate from `notes`. Pull does not recreate a note that is in that trash. If you had it synced, the plugin stops tracking it and says it was left in the trash.
 

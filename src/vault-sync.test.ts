@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { NotesClient, toApiError } from './api';
 import { findRemoteMoves, pullFromSite } from './sync';
@@ -5,8 +6,12 @@ import type { HttpResponse } from './types';
 import {
 	DELETE_ON_SITE,
 	KEEP_ON_SITE,
+	bulkDeletePrompt,
+	createMoveChain,
 	leftFolderPrompt,
+	planDeleteBatch,
 	planRemoteReconcile,
+	planRestore,
 	planVaultDelete,
 	planVaultRename,
 	siteDeletePrompt,
@@ -56,6 +61,78 @@ describe('site delete choice', () => {
 		expect(leftFolderPrompt('diary/hello.md')).toMatch(/left the sync folder/);
 		expect(DELETE_ON_SITE).toMatch(/Delete on site/);
 		expect(KEEP_ON_SITE).toMatch(/Keep on site/);
+	});
+});
+
+describe('delete batches and moves out of the folder', () => {
+	it('asks for every note when more than one is deleted, even if the setting is always', () => {
+		expect(planDeleteBatch({ count: 3, setting: 'always', leftFolder: false })).toBe('ask');
+		expect(planDeleteBatch({ count: 2, setting: 'never', leftFolder: false })).toBe('ask');
+		expect(bulkDeletePrompt(3)).toMatch(/Delete 3 notes/);
+		expect(bulkDeletePrompt(3)).toMatch(/trash/);
+	});
+
+	it('does not apply always when a single note leaves the sync folder', () => {
+		expect(planDeleteBatch({ count: 1, setting: 'always', leftFolder: true })).toBe('ask');
+		expect(planDeleteBatch({ count: 1, setting: 'ask', leftFolder: true })).toBe('ask');
+		expect(planDeleteBatch({ count: 1, setting: 'never', leftFolder: true })).toBe('keep');
+		expect(planDeleteBatch({ count: 1, setting: 'always', leftFolder: false })).toBe('delete');
+		expect(planDeleteBatch({ count: 1, setting: 'never', leftFolder: false })).toBe('keep');
+	});
+});
+
+describe('restore versus local edits', () => {
+	it('writes the restored note only when the vault file is missing or unchanged', () => {
+		expect(planRestore({ localExists: false })).toBe('write-restored');
+		expect(
+			planRestore({ localExists: true, localFingerprint: 'abc', syncedFingerprint: 'abc' }),
+		).toBe('write-restored');
+		expect(
+			planRestore({ localExists: true, localFingerprint: 'edited', syncedFingerprint: 'abc' }),
+		).toBe('keep-local');
+		expect(planRestore({ localExists: true, localFingerprint: 'edited' })).toBe('keep-local');
+	});
+});
+
+describe('rename chain', () => {
+	it('sends A to B, then B to C, using the revision from the first move', async () => {
+		const calls: [string, string, string][] = [];
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const chain = createMoveChain();
+		const first = chain.enqueue('a.md', 'b.md', 'r1', async (from, to, revision) => {
+			calls.push([from, to, revision]);
+			await gate;
+			return 'r2';
+		});
+		expect(chain.has('b.md')).toBe(true);
+		const second = chain.enqueue('b.md', 'c.md', undefined, async (from, to, revision) => {
+			calls.push([from, to, revision]);
+			return 'r3';
+		});
+		expect(calls).toEqual([]);
+		release();
+		await first;
+		await second;
+		expect(calls).toEqual([
+			['a.md', 'b.md', 'r1'],
+			['b.md', 'c.md', 'r2'],
+		]);
+	});
+});
+
+describe('vault events wait for layout', () => {
+	it('registers rename and delete inside onLayoutReady', () => {
+		const source = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
+		const ready = source.indexOf('onLayoutReady');
+		const rename = source.indexOf("vault.on('rename'");
+		const deleted = source.indexOf("vault.on('delete'");
+		expect(ready).toBeGreaterThan(-1);
+		expect(rename).toBeGreaterThan(ready);
+		expect(deleted).toBeGreaterThan(ready);
+		expect(source).toMatch(/if \(!this\.alive \|\| !this\.vaultReady\) return/);
 	});
 });
 
