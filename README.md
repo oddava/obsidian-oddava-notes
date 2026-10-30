@@ -51,14 +51,16 @@ The plugin id is `oddava-notes`. Copy these three files into `<vault>/.obsidian/
 
 Reload Obsidian, enable **Oddava Notes**, then open a setup link or paste the token in settings.
 
-You can pin **Publish current note** and **Pull notes from site** to the mobile toolbar from the command palette.
+You can pin **Publish current note**, **Pull notes from site**, and **Post current note to Telegram** to the mobile toolbar from the command palette.
 
 ## What you can do
 
 - **Publish current note.** The open note is created on the site, or updated if this device has published or pulled it before.
 - **Pull notes from site.** Notes that are missing locally are downloaded. Notes the site has changed, and you have not, are updated. If both sides changed, neither side is overwritten.
 - **Pull automatically.** On by default. A few seconds after the workspace is ready, then every 5 minutes, the plugin pulls while Obsidian is open. It uses the same rules as **Pull notes from site**, including conflict copies, so unpublished local edits are not overwritten. Nothing is announced when the vault is already current. A short notice appears when notes were downloaded or a conflict file was saved. If a pull fails (the phone is offline, for example), that error is shown once and then stays quiet until a later pull succeeds.
-- **Publish on save.** Optional. Off until you turn it on. After Obsidian saves a note in the sync folder, the plugin waits 1.5 seconds and publishes it.
+- **Publish on save.** Optional. Off until you turn it on. After Obsidian saves a note in the sync folder, the plugin waits 1.5 seconds and publishes it. It never posts to Telegram.
+- **Post current note to Telegram.** Manual. Posts a note that is already on the site: bold title, a short excerpt, and the public link (`https://oddava.me/notes/diary/hello` for `diary/hello.md`). A confirmation shows the exact text. Cancel sends nothing.
+- **Publish and post to Telegram.** Publishes the open note, then opens that same confirmation.
 - **Test connection.** The settings tab lists how many notes the site currently has.
 
 There is no delete. Removing a note stays in Studio on the site.
@@ -73,10 +75,29 @@ There is no delete. Removing a note stays in Studio on the site.
 | Publish on save | off | Debounced publish after a save. |
 | Pull automatically | on | Repeating pull while Obsidian is open. |
 | Auto-pull interval | 5 minutes | At least 1 minute between pulls. |
+| Telegram bot token | empty | From @BotFather. Masked. The bot must be a channel admin. |
+| Telegram channel | `@justoddava` | Where posts go. A `@channel` or a numeric id. |
 
 `oddava.me/diary/hello.md` in the vault is `diary/hello.md` on the site. Every folder and file name under the sync folder has to be lowercase kebab-case (`reading/atomic-habits.md`, `diary/06-10-2026.md`). Spaces, capitals, and underscores are rejected before a request is sent. That is the same rule the API uses.
 
-The token is stored in the plugin’s `data.json` inside the vault (`.obsidian/plugins/oddava-notes/data.json`). Do not commit that file, and do not put the token in this repository. Notices never include it.
+The notes API token and the Telegram bot token are stored in the plugin’s `data.json` inside the vault (`.obsidian/plugins/oddava-notes/data.json`). Do not commit that file, and do not put either token in this repository. Notices never include them.
+
+## Post to Telegram
+
+Posting is manual. Publishing a blank page first, then filling it in, must not announce the blank page.
+
+1. In Telegram, open **@BotFather** and send `/newbot`. Copy the token it gives you.
+2. Add that bot as an admin of the channel (the default is `@justoddava`) and allow it to post messages.
+3. Paste the token into **Telegram bot token**. Change **Telegram channel** only if you are not posting to `@justoddava`.
+4. Publish the note, then run **Post current note to Telegram**. Or run **Publish and post to Telegram**, which publishes and then asks you to confirm the post.
+
+The message is the title in bold, a short plain-text excerpt, and the public URL. `diary/hello.md` is `https://oddava.me/notes/diary/hello`, the same path the site uses. A note that is outside the sync folder, or not published yet, is refused. A nearly empty note warns you and waits for Cancel or Send.
+
+The channel message id is stored in the note as `telegram_message_id`. The site drops that key (it only keeps title, icon, order, and updated), so a pull copies it back onto the site text. The note body is what revisions compare, so the id does not look like a different essay. Other devices that share the vault see the same id.
+
+`telegram: true` in the frontmatter opts that note in. A manual **Publish current note** (the command or the ribbon) then posts it after a successful publish, if the note has at least 40 characters of text once frontmatter and Markdown are stripped, and no message id yet. A shorter note is skipped with a short notice. **Publish on save** never posts and never edits the channel, because it runs while you are still typing.
+
+Publishing a note that already has `telegram_message_id` updates that channel post when the text changed. If Telegram says the text is unchanged, that counts as success. If the channel post was deleted, the plugin tells you and leaves the id in place so you can send a new one on purpose. **Post current note to Telegram** on a note that was already posted offers **Update existing** and **Post new**.
 
 ## Create the token
 
@@ -163,11 +184,11 @@ npm test
 npm run build
 ```
 
-`npm test` runs the path mapping, sync, and auto-pull tests with a fake notes API and a fake clock. `npm run build` typechecks, bundles `src/main.ts` to `main.js` with esbuild, and checks that the bundle does not call Node or `fetch`.
+`npm test` runs the path mapping, sync, auto-pull, and Telegram tests with a fake notes API, a fake clock, and a fake Bot API. `npm run build` typechecks, bundles `src/main.ts` to `main.js` with esbuild, and checks that the bundle does not call Node or `fetch`.
 
 `npm run dev` watches and rebuilds while you work.
 
-`npm version 1.0.1` runs `version-bump.mjs` (also `npm run version-bump`), which writes that version into `manifest.json` and `versions.json`. Push a tag with the same number and no `v` prefix (`1.0.1`, not `v1.0.1`). The release workflow checks the tag against the manifest, then publishes `main.js`, `manifest.json`, and `styles.css`.
+`npm version 1.0.2` runs `version-bump.mjs` (also `npm run version-bump`), which writes that version into `manifest.json` and `versions.json`. Push a tag with the same number and no `v` prefix (`1.0.2`, not `v1.0.2`). The release workflow checks the tag against the manifest, then publishes `main.js`, `manifest.json`, and `styles.css`.
 
 The layout follows the official sample plugin: `src/main.ts`, `esbuild.config.mjs`, `manifest.json`, `versions.json`, `styles.css`, `version-bump.mjs`.
 
@@ -190,3 +211,5 @@ Rate limiting and the disabled-API response are shown as notices, not thrown awa
 A second device should not have to type the token. Obsidian can open `obsidian://oddava-notes-setup?...` and pass the query string to the plugin. The token is a query parameter because that is the channel a phone and a computer already share. The plugin writes it into plugin data and does not print it. The link is a secret, the same way `data.json` is a secret.
 
 Automatic pull is the same function as **Pull notes from site**. The schedule is a short timeout after the layout is ready, plus an interval. Both are cancelled on unload and when the toggle or the interval changes. A pull in progress holds a lock. The interval does not start a second one; the command runs after the lock clears. Notices on the automatic path are filtered. No vault change and no new error means silence, so a phone in a pocket does not toast “already up to date” or the same offline error every five minutes. Conflict copies are unchanged: unpublished local edits stay in the note, and the site copy is written beside it.
+
+Telegram is a separate manual step. The bot token stays in plugin data, like the notes API token. The message id stays in the note, because that file is what another device already syncs. Publish on save does not call `sendMessage` or `editMessageText`. A manual publish of a note with `telegram: true` may send the first post, and a later manual publish may edit it, and only when the rendered text changed. `message is not modified` is treated as success. HTTP still goes through `requestUrl`.

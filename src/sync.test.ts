@@ -225,6 +225,24 @@ describe('pullFromSite', () => {
 		expect(summarizePull(result)).toMatch(/Already up to date/);
 	});
 
+	it('treats a telegram message id as the same note when the writing matches', async () => {
+		const site = new FakeSite();
+		const remote = site.seed('diary/hello.md', '# hello\n\nstill learning.');
+		const content = `---\ntelegram: true\ntelegram_message_id: 42\n---\n\n# hello\n\nstill learning.\n`;
+		const result = await pullFromSite(clientFor(site), () =>
+			local({
+				vaultPath: `${folder}/diary/hello.md`,
+				exists: true,
+				content,
+				revision: 'r-older',
+				fingerprint: contentFingerprint(content),
+			}),
+		);
+		expect(result.conflicts).toHaveLength(0);
+		expect(result.downloaded).toHaveLength(0);
+		expect(result.aligned[0]?.revision).toBe(remote.revision);
+	});
+
 	it('leaves unpublished vault edits in place when the site revision matches', async () => {
 		const site = new FakeSite();
 		const remote = site.seed('diary/hello.md', '# hello\n');

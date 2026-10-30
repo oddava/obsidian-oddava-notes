@@ -43,6 +43,74 @@ export function readUpdated(content: string): string | undefined {
 	return readFrontmatterScalar(raw, 'updated');
 }
 
+export interface TelegramFrontmatter {
+	/** `telegram: true` opts the note in. Anything else is off. */
+	enabled: boolean;
+	messageId?: number;
+	/** Fingerprint of the plain text last sent to Telegram. */
+	hash?: string;
+}
+
+export function readTelegramFrontmatter(content: string): TelegramFrontmatter {
+	const { raw } = splitFrontmatter(content);
+	if (raw === null) return { enabled: false };
+	const idRaw = readFrontmatterScalar(raw, 'telegram_message_id');
+	const id = idRaw !== undefined && /^\d+$/.test(idRaw) ? Number(idRaw) : undefined;
+	const hash = readFrontmatterScalar(raw, 'telegram_hash');
+	return {
+		enabled: readFrontmatterScalar(raw, 'telegram') === 'true',
+		messageId: id !== undefined && id > 0 ? id : undefined,
+		hash: hash || undefined,
+	};
+}
+
+/**
+ * The site drops every frontmatter key except title, icon, order, and updated.
+ * A pull of the site copy would otherwise erase `telegram` and
+ * `telegram_message_id`. Copy those keys back from the vault note when the
+ * incoming text does not already have them. The note body is unchanged, so
+ * revision checks still compare the writing.
+ */
+export function preserveTelegramFrontmatter(local: string, incoming: string): string {
+	const kept = readTelegramFrontmatter(local);
+	const incomingMeta = readTelegramFrontmatter(incoming);
+	const updates: Record<string, string> = {};
+	if (kept.enabled && !incomingMeta.enabled) updates.telegram = 'true';
+	if (kept.messageId && !incomingMeta.messageId) {
+		updates.telegram_message_id = String(kept.messageId);
+	}
+	if (kept.hash && !incomingMeta.hash) updates.telegram_hash = kept.hash;
+	if (Object.keys(updates).length === 0) return incoming;
+	return upsertFrontmatter(incoming, updates);
+}
+
+/** Set or replace scalar keys. Other keys, including title and updated, stay put. */
+export function upsertFrontmatter(content: string, updates: Record<string, string>): string {
+	const keys = Object.keys(updates);
+	if (keys.length === 0) return content;
+	const match = content.match(FRONTMATTER);
+	if (match?.[1] === undefined || match.index === undefined) {
+		const lines = keys.map((key) => `${key}: ${updates[key]}`);
+		const body = content.length > 0 ? `\n${content.replace(/^\n/, '')}` : '';
+		return `---\n${lines.join('\n')}\n---\n${body}`;
+	}
+	const newline = match[0].includes('\r\n') ? '\r\n' : '\n';
+	const lines = match[1].split(/\r?\n/);
+	const seen = new Set<string>();
+	const next = lines.map((line) => {
+		const key = keys.find((candidate) => line.startsWith(`${candidate}:`));
+		if (!key) return line;
+		seen.add(key);
+		return `${key}: ${updates[key]}`;
+	});
+	for (const key of keys) {
+		if (!seen.has(key)) next.push(`${key}: ${updates[key]}`);
+	}
+	const block = `---${newline}${next.join(newline)}${newline}---${newline}`;
+	const after = content.slice(match.index + match[0].length);
+	return content.slice(0, match.index) + block + after;
+}
+
 export function noteBodiesMatch(left: string, right: string): boolean {
 	return normalizeBody(splitFrontmatter(left).body) === normalizeBody(splitFrontmatter(right).body);
 }

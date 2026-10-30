@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { MarkdownView, Menu, Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { NotesClient } from './api';
 import {
 	canAutoPull,
@@ -30,6 +30,20 @@ import { mergeSettings, type OddavaSettings } from './settings-data';
 import { OddavaSettingTab, type OddavaHost } from './settings';
 import { buildSetupLink, parseSetupLink, SETUP_ACTION, SETUP_LINK_COPIED } from './setup-link';
 import { publishNote, pullFromSite, summarizePull, testConnection, type PullResult } from './sync';
+import { TelegramPostModal } from './telegram-modal';
+import {
+	editTelegramMessage,
+	prepareTelegramPost,
+	sendTelegramMessage,
+	telegramFollowUp,
+	telegramHtml,
+	telegramTokenProblem,
+	TelegramPostDeleted,
+	withTelegramMessageId,
+	type TelegramPostDraft,
+} from './telegram';
+import { contentFingerprint } from './fingerprint';
+import { preserveTelegramFrontmatter, readTelegramFrontmatter } from './frontmatter';
 import type { HttpClient } from './types';
 import type { LocalNote } from './sync';
 
@@ -40,8 +54,9 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		const id = window.setTimeout(callback, ms);
 		return () => window.clearTimeout(id);
 	});
-	private readonly tails = new Map<string, Promise<void>>();
+	private readonly tails = new Map<string, Promise<unknown>>();
 	private readonly remoteWrites = new Set<string>();
+	private readonly telegramSending = new Set<string>();
 	private readonly pulls = createPullGate();
 	private readonly autoPull: AutoPullSchedule = createAutoPullSchedule({
 		enabled: () => this.alive && this.settings.autoPull,
@@ -89,6 +104,34 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 				void this.pullFromSite('manual');
 			},
 		});
+
+		this.addCommand({
+			id: 'post-current-note-to-telegram',
+			name: 'Post current note to Telegram',
+			callback: () => {
+				void this.postActiveToTelegram();
+			},
+		});
+
+		this.addCommand({
+			id: 'publish-and-post-to-telegram',
+			name: 'Publish and post to Telegram',
+			callback: () => {
+				this.publishAndPostActive();
+			},
+		});
+
+		this.registerEvent(
+			this.app.workspace.on('file-menu', (menu, file) => {
+				if (file instanceof TFile && file.extension === 'md') this.addTelegramMenuItem(menu, file);
+			}),
+		);
+		this.registerEvent(
+			this.app.workspace.on('editor-menu', (menu, _editor, view) => {
+				const file = view.file;
+				if (file instanceof TFile && file.extension === 'md') this.addTelegramMenuItem(menu, file);
+			}),
+		);
 
 		this.settingTab = new OddavaSettingTab(this.app, this);
 		this.addSettingTab(this.settingTab);
@@ -177,6 +220,28 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		this.enqueue(file.path, () => this.publishFile(file, 'command'));
 	}
 
+	private publishAndPostActive(): void {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			this.notify('Open a Markdown note to publish.', 6000);
+			return;
+		}
+		this.debouncer.cancel(file.path);
+		this.enqueue(file.path, async () => {
+			const content = await this.readNote(file, 'publish-and-post');
+			const result = await this.publishFile(file, 'publish-and-post');
+			if (result === 'published') await this.openTelegramPost(file, content);
+		});
+	}
+
+	private addTelegramMenuItem(menu: Menu, file: TFile): void {
+		menu.addItem((item) => {
+			item.setTitle('Post to Telegram').setIcon('send').onClick(() => {
+				void this.postFileToTelegram(file);
+			});
+		});
+	}
+
 	private async pullFromSite(source: PullSource): Promise<void> {
 		if (!this.alive) return;
 		const working = source === 'manual' ? new Notice('Pulling notes from the site…', 0) : null;
@@ -227,10 +292,11 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 
 	private async applyPull(result: PullResult, saved: { dirty: boolean }): Promise<void> {
 		for (const note of result.downloaded) {
-			await this.writeVaultFile(note.vaultPath, note.content);
+			const content = await this.withLocalTelegramFields(note.vaultPath, note.content);
+			await this.writeVaultFile(note.vaultPath, content);
 			this.settings.synced[note.apiPath] = {
 				revision: note.revision,
-				fingerprint: note.fingerprint,
+				fingerprint: contentFingerprint(content),
 			};
 			delete this.settings.conflictRevisions[note.apiPath];
 			saved.dirty = true;
@@ -273,7 +339,7 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		});
 	}
 
-	private enqueue(path: string, job: () => Promise<void>): void {
+	private enqueue(path: string, job: () => Promise<unknown>): void {
 		const previous = this.tails.get(path) ?? Promise.resolve();
 		const next = previous.then(job, job);
 		this.tails.set(path, next);
@@ -282,29 +348,33 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		});
 	}
 
-	private async publishFile(file: TFile, source: 'command' | 'autosave'): Promise<void> {
-		if (!this.alive) return;
+	private async publishFile(
+		file: TFile,
+		source: 'command' | 'autosave' | 'publish-and-post',
+	): Promise<'published' | 'stopped'> {
+		const interactive = source !== 'autosave';
+		if (!this.alive) return 'stopped';
 		if (isSiteConflictFile(file.path)) {
-			if (source === 'command') {
+			if (interactive) {
 				this.notify(
 					'This file is a conflict copy from the site. Merge it into the original note, delete it, and publish the original.',
 					8000,
 				);
 			}
-			return;
+			return 'stopped';
 		}
 
-		if (!(await this.ensureSyncFolder('manual'))) return;
+		if (!(await this.ensureSyncFolder('manual'))) return 'stopped';
 
 		if (!pathInsideSyncFolder(this.settings.syncFolder, file.path)) {
-			if (source === 'command') this.offerToMove(file);
-			return;
+			if (interactive) this.offerToMove(file);
+			return 'stopped';
 		}
 
 		const mapped = toApiPath(this.settings.syncFolder, file.path);
 		if (!mapped.ok) {
-			if (source === 'command') this.notify(mapped.reason, 8000);
-			return;
+			if (interactive) this.notify(mapped.reason, 8000);
+			return 'stopped';
 		}
 
 		const siblings = this.siblingNames(file.path);
@@ -313,10 +383,11 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			hasOpenConflict(file.path, siblings) &&
 			this.settings.conflictRevisions[mapped.apiPath]
 		) {
-			return;
+			return 'stopped';
 		}
 
 		const content = await this.readNote(file, source);
+		let published = false;
 		await this.withClient(async (client) => {
 			const outcome = await publishNote(client, {
 				apiPath: mapped.apiPath,
@@ -328,7 +399,7 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			});
 			if (!this.alive) return;
 			if (outcome.kind === 'blocked') {
-				if (source === 'command') this.notify(outcome.message, 8000);
+				if (interactive) this.notify(outcome.message, 8000);
 				return;
 			}
 			if (outcome.kind === 'published') {
@@ -339,6 +410,8 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 				delete this.settings.conflictRevisions[mapped.apiPath];
 				await this.saveSettings();
 				this.notify(outcome.message);
+				published = true;
+				if (source === 'command') await this.afterManualPublish(file, content);
 				return;
 			}
 			if (outcome.kind === 'conflict') {
@@ -350,10 +423,14 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			}
 			this.notify(outcome.message, 8000);
 		});
+		return published ? 'published' : 'stopped';
 	}
 
-	private async readNote(file: TFile, source: 'command' | 'autosave'): Promise<string> {
-		if (source === 'command') {
+	private async readNote(
+		file: TFile,
+		source: 'command' | 'autosave' | 'publish-and-post',
+	): Promise<string> {
+		if (source !== 'autosave') {
 			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 			if (view?.file?.path === file.path) return view.editor.getValue();
 		}
@@ -544,6 +621,198 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 
 	private notify(message: string, timeout = 5000): void {
 		if (!this.alive) return;
-		new Notice(redact(message, this.settings.apiToken), timeout);
+		const hidden = redact(redact(message, this.settings.apiToken), this.settings.telegramBotToken);
+		new Notice(hidden, timeout);
+	}
+
+	private async postActiveToTelegram(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			this.notify('Open a Markdown note to post to Telegram.', 6000);
+			return;
+		}
+		await this.postFileToTelegram(file);
+	}
+
+	private async postFileToTelegram(file: TFile): Promise<void> {
+		const content = await this.readNote(file, 'command');
+		await this.openTelegramPost(file, content);
+	}
+
+	private async openTelegramPost(file: TFile, content: string): Promise<void> {
+		if (!this.alive) return;
+		const tokenProblem = telegramTokenProblem(this.settings.telegramBotToken);
+		if (tokenProblem) {
+			this.notify(tokenProblem, 8000);
+			return;
+		}
+		const prepared = prepareTelegramPost({
+			vaultPath: file.path,
+			syncFolder: this.settings.syncFolder,
+			content,
+			baseUrl: this.settings.baseUrl,
+			channel: this.settings.telegramChannel,
+			publishedRevision: this.publishedRevision(file.path),
+			fingerprint: this.publishedFingerprint(file.path),
+		});
+		if (!prepared.ok) {
+			this.notify(prepared.reason, 8000);
+			return;
+		}
+		const draft = prepared.draft;
+		new TelegramPostModal(this.app, draft, {
+			sendNew: () => this.sendNewTelegramPost(file, draft),
+			updateExisting: draft.messageId ? () => this.updateTelegramPost(file, draft) : undefined,
+		}).open();
+	}
+
+	/**
+	 * Manual Publish only. A flagged note with real text and no message id is
+	 * posted. A note that was already posted is edited when the text changed.
+	 * Publish on save does not call this.
+	 */
+	private async afterManualPublish(file: TFile, content: string): Promise<void> {
+		const rendered = this.renderTelegram(file.path, content);
+		if (!rendered) {
+			const meta = readTelegramFrontmatter(content);
+			if (meta.enabled || meta.messageId) {
+				this.notify('Could not build the Telegram post. Check the channel and the site URL.', 8000);
+			}
+			return;
+		}
+		const followUp = telegramFollowUp('command', content, rendered.plain);
+		if (followUp.kind === 'skip') return;
+		if (followUp.kind === 'too-short') {
+			this.notify(followUp.notice, 6000);
+			return;
+		}
+		if (followUp.kind === 'post') {
+			await this.sendNewTelegramPost(file, rendered);
+			return;
+		}
+		if (followUp.unchanged) return;
+		await this.updateTelegramPost(file, { ...rendered, messageId: followUp.messageId });
+	}
+
+	private renderTelegram(vaultPath: string, content: string): TelegramPostDraft | null {
+		const prepared = prepareTelegramPost({
+			vaultPath,
+			syncFolder: this.settings.syncFolder,
+			content,
+			baseUrl: this.settings.baseUrl,
+			channel: this.settings.telegramChannel,
+			publishedRevision: this.publishedRevision(vaultPath) ?? 'pending',
+		});
+		return prepared.ok ? prepared.draft : null;
+	}
+
+	private publishedRevision(vaultPath: string): string | undefined {
+		const mapped = toApiPath(this.settings.syncFolder, vaultPath);
+		if (!mapped.ok) return undefined;
+		return this.settings.synced[mapped.apiPath]?.revision;
+	}
+
+	private publishedFingerprint(vaultPath: string): string | undefined {
+		const mapped = toApiPath(this.settings.syncFolder, vaultPath);
+		if (!mapped.ok) return undefined;
+		return this.settings.synced[mapped.apiPath]?.fingerprint;
+	}
+
+	private async sendNewTelegramPost(file: TFile, draft: TelegramPostDraft): Promise<boolean> {
+		return this.withTelegramSend(draft.apiPath, async () => {
+			const sent = await sendTelegramMessage(this.http, {
+				token: this.settings.telegramBotToken,
+				chatId: this.settings.telegramChannel,
+				html: draft.html,
+			});
+			await this.recordTelegramMessage(file, draft.apiPath, sent.messageId, draft.plain);
+			this.notify(`Posted to ${this.settings.telegramChannel}.`);
+			return true;
+		});
+	}
+
+	private async updateTelegramPost(file: TFile, draft: TelegramPostDraft): Promise<boolean> {
+		const messageId = draft.messageId;
+		if (!messageId) return false;
+		if (draft.unchanged) {
+			this.notify('The Telegram post already matches this note.');
+			return true;
+		}
+		return this.withTelegramSend(draft.apiPath, async () => {
+			const html = draft.html || telegramHtml(draft.title, draft.excerpt, draft.url);
+			let unchanged = false;
+			try {
+				unchanged = (await editTelegramMessage(this.http, {
+					token: this.settings.telegramBotToken,
+					chatId: this.settings.telegramChannel,
+					messageId,
+					html,
+				})) === 'unchanged';
+			} catch (error) {
+				if (error instanceof TelegramPostDeleted) {
+					this.notify(error.message, 10000);
+					return false;
+				}
+				throw error;
+			}
+			await this.recordTelegramMessage(file, draft.apiPath, messageId, draft.plain);
+			this.notify(
+				unchanged
+					? 'The Telegram post already matches this note.'
+					: `Updated the post on ${this.settings.telegramChannel}.`,
+			);
+			return true;
+		});
+	}
+
+	private async withTelegramSend(apiPath: string, run: () => Promise<boolean>): Promise<boolean> {
+		if (this.telegramSending.has(apiPath)) {
+			this.notify('That note is already being posted.');
+			return false;
+		}
+		const tokenProblem = telegramTokenProblem(this.settings.telegramBotToken);
+		if (tokenProblem) {
+			this.notify(tokenProblem, 8000);
+			return false;
+		}
+		this.telegramSending.add(apiPath);
+		try {
+			return await run();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Could not reach Telegram.';
+			this.notify(message, 8000);
+			return false;
+		} finally {
+			this.telegramSending.delete(apiPath);
+		}
+	}
+
+	private async recordTelegramMessage(
+		file: TFile,
+		apiPath: string,
+		messageId: number,
+		plain: string,
+	): Promise<void> {
+		const current = await this.readNote(file, 'command');
+		const next = withTelegramMessageId(current, messageId, plain);
+		await this.writeVaultFile(file.path, next);
+		const synced = this.settings.synced[apiPath];
+		if (!synced) return;
+		this.settings.synced[apiPath] = {
+			revision: synced.revision,
+			fingerprint: contentFingerprint(next),
+		};
+		await this.saveSettings();
+	}
+
+	private async withLocalTelegramFields(vaultPath: string, incoming: string): Promise<string> {
+		const existing = this.app.vault.getAbstractFileByPath(vaultPath);
+		if (!(existing instanceof TFile)) return incoming;
+		try {
+			const local = await this.app.vault.read(existing);
+			return preserveTelegramFrontmatter(local, incoming);
+		} catch {
+			return incoming;
+		}
 	}
 }

@@ -6,6 +6,7 @@ import {
 	MIN_AUTO_PULL_MINUTES,
 	type OddavaSettings,
 } from './settings-data';
+import { DEFAULT_TELEGRAM_CHANNEL, normalizeTelegramChannel } from './telegram';
 
 export interface OddavaHost {
 	settings: OddavaSettings;
@@ -144,6 +145,61 @@ export class OddavaSettingTab extends PluginSettingTab {
 					void this.plugin.saveSettings().then(() => {
 						this.plugin.refreshAutoPull();
 					});
+				});
+			});
+
+		let botInput: HTMLInputElement | null = null;
+		new Setting(containerEl)
+			.setName('Telegram bot token')
+			.setDesc(
+				'From @BotFather. The bot must be an admin of the channel. It stays in this plugin’s data on the device. Notices never include it. Posts are not sent on their own unless a note says telegram: true.',
+			)
+			.addText((text) => {
+				text.inputEl.type = 'password';
+				text.inputEl.autocomplete = 'off';
+				text.inputEl.autocapitalize = 'off';
+				text.inputEl.spellcheck = false;
+				text.setPlaceholder('Paste the bot token');
+				text.setValue(this.plugin.settings.telegramBotToken);
+				botInput = text.inputEl;
+				text.onChange(async (value) => {
+					const trimmed = value.trim();
+					if (trimmed !== value) text.setValue(trimmed);
+					this.plugin.settings.telegramBotToken = trimmed;
+					await this.plugin.saveSettings();
+				});
+			})
+			.addButton((button) =>
+				button.setButtonText('Show').onClick(() => {
+					if (!botInput) return;
+					const hidden = botInput.type === 'password';
+					botInput.type = hidden ? 'text' : 'password';
+					button.setButtonText(hidden ? 'Hide' : 'Show');
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Telegram channel')
+			.setDesc(
+				'Where posts go. A public channel like @justoddava, or a numeric id. The bot has to be an admin there.',
+			)
+			.addText((text) => {
+				text.setPlaceholder(DEFAULT_TELEGRAM_CHANNEL).setValue(this.plugin.settings.telegramChannel);
+				text.onChange(async (value) => {
+					const normalized = normalizeTelegramChannel(value);
+					if (!normalized || normalized === this.plugin.settings.telegramChannel) return;
+					this.plugin.settings.telegramChannel = normalized;
+					await this.plugin.saveSettings();
+				});
+				text.inputEl.addEventListener('blur', () => {
+					const normalized =
+						normalizeTelegramChannel(text.getValue()) ||
+						this.plugin.settings.telegramChannel ||
+						DEFAULT_TELEGRAM_CHANNEL;
+					text.setValue(normalized);
+					if (normalized === this.plugin.settings.telegramChannel) return;
+					this.plugin.settings.telegramChannel = normalized;
+					void this.plugin.saveSettings();
 				});
 			});
 

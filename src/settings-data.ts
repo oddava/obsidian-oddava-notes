@@ -1,3 +1,5 @@
+import { DEFAULT_TELEGRAM_CHANNEL, normalizeTelegramChannel } from './telegram';
+
 /** Floor so a pull cannot loop inside the site's 120 requests/minute limit. */
 export const MIN_AUTO_PULL_MINUTES = 1;
 
@@ -31,6 +33,10 @@ export interface OddavaSettings {
 	synced: Record<string, SyncedNote>;
 	/** Site revision captured when a conflict file was written for this API path. */
 	conflictRevisions: Record<string, string>;
+	/** Bot token from BotFather. Empty until the user pastes one. */
+	telegramBotToken: string;
+	/** Channel username or numeric id. Posts remember their id in the note. */
+	telegramChannel: string;
 }
 
 export function defaultSettings(): OddavaSettings {
@@ -43,6 +49,8 @@ export function defaultSettings(): OddavaSettings {
 		autoPullIntervalMinutes: DEFAULT_AUTO_PULL_MINUTES,
 		synced: {},
 		conflictRevisions: {},
+		telegramBotToken: '',
+		telegramChannel: DEFAULT_TELEGRAM_CHANNEL,
 	};
 }
 
@@ -64,6 +72,10 @@ export function mergeSettings(stored: unknown): OddavaSettings {
 		autoPullIntervalMinutes: clampAutoPullMinutes(stored.autoPullIntervalMinutes),
 		synced: sanitizeSynced(stored.synced),
 		conflictRevisions: sanitizeStringMap(stored.conflictRevisions),
+		telegramBotToken: typeof stored.telegramBotToken === 'string' ? stored.telegramBotToken : '',
+		telegramChannel:
+			normalizeTelegramChannel(typeof stored.telegramChannel === 'string' ? stored.telegramChannel : '') ??
+			defaults.telegramChannel,
 	};
 }
 
