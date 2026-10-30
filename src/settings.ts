@@ -1,12 +1,18 @@
 import { App, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { normalizeSyncFolder } from './paths';
-import { defaultSettings, type OddavaSettings } from './settings-data';
+import {
+	clampAutoPullMinutes,
+	defaultSettings,
+	MIN_AUTO_PULL_MINUTES,
+	type OddavaSettings,
+} from './settings-data';
 
 export interface OddavaHost {
 	settings: OddavaSettings;
 	saveSettings(): Promise<void>;
 	testConnection(): Promise<void>;
 	copySetupLink(): Promise<void>;
+	refreshAutoPull(): void;
 }
 
 export class OddavaSettingTab extends PluginSettingTab {
@@ -100,6 +106,48 @@ export class OddavaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Pull automatically')
+			.setDesc(
+				'While Obsidian is open, pull notes from the site a few seconds after the workspace is ready, then on the interval below. Unpublished local edits are left alone, the same as Pull notes from site.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.autoPull).onChange(async (value) => {
+					this.plugin.settings.autoPull = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshAutoPull();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Auto-pull interval')
+			.setDesc(
+				`Minutes between automatic pulls. At least ${MIN_AUTO_PULL_MINUTES}. The site allows 120 requests a minute; each pull is one list plus a fetch for every note that changed.`,
+			)
+			.addText((text) => {
+				text.inputEl.type = 'number';
+				text.inputEl.min = String(MIN_AUTO_PULL_MINUTES);
+				text.inputEl.step = '1';
+				text.inputEl.inputMode = 'numeric';
+				text.setValue(String(this.plugin.settings.autoPullIntervalMinutes));
+				text.onChange(async (value) => {
+					const minutes = wholeMinutes(value);
+					if (minutes === null || minutes === this.plugin.settings.autoPullIntervalMinutes) return;
+					this.plugin.settings.autoPullIntervalMinutes = minutes;
+					await this.plugin.saveSettings();
+					this.plugin.refreshAutoPull();
+				});
+				text.inputEl.addEventListener('blur', () => {
+					const minutes = clampAutoPullMinutes(text.getValue());
+					text.setValue(String(minutes));
+					if (minutes === this.plugin.settings.autoPullIntervalMinutes) return;
+					this.plugin.settings.autoPullIntervalMinutes = minutes;
+					void this.plugin.saveSettings().then(() => {
+						this.plugin.refreshAutoPull();
+					});
+				});
+			});
+
+		new Setting(containerEl)
 			.setName('Another device')
 			.setDesc(
 				'Copies a link with your token, site URL, and folder. Open it on your phone or other computer. Send it only to yourself.',
@@ -124,4 +172,14 @@ export class OddavaSettingTab extends PluginSettingTab {
 				}),
 			);
 	}
+}
+
+/** Accept a finished whole number of minutes. Leave partial typing for blur. */
+function wholeMinutes(value: string): number | null {
+	const trimmed = value.trim();
+	if (!/^\d+$/.test(trimmed)) return null;
+	const parsed = Number(trimmed);
+	const minutes = clampAutoPullMinutes(parsed);
+	if (minutes !== parsed) return null;
+	return minutes;
 }

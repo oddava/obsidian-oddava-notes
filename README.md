@@ -1,6 +1,6 @@
 # Oddava Notes
 
-An Obsidian plugin that publishes Markdown notes from a vault folder to [oddava.me](https://oddava.me) and pulls notes back down. It runs on desktop and on the Obsidian mobile apps.
+An Obsidian plugin that publishes Markdown notes from a vault folder to [oddava.me](https://oddava.me) and pulls notes back down, including on a timer while Obsidian is open. It runs on desktop and on the Obsidian mobile apps.
 
 The site already stores the garden. This plugin is a client for the notes API: a bearer token, a path, and a revision.
 
@@ -15,7 +15,7 @@ The link looks like `obsidian://oddava-notes-setup?token=...&url=...&folder=...`
 
 The link contains the API token. Send it only to yourself.
 
-The first **Publish current note** or **Pull notes from site** creates the sync folder if it is not there yet (`oddava.me` by default). If the open note sits outside that folder, a notice offers to move it in and publish it.
+The first publish or pull creates the sync folder if it is not there yet (`oddava.me` by default). With a token saved, the automatic pull does that too. If the open note sits outside that folder, a notice offers to move it in and publish it.
 
 ### Manual install
 
@@ -33,6 +33,7 @@ You can pin **Publish current note** and **Pull notes from site** to the mobile 
 
 - **Publish current note.** The open note is created on the site, or updated if this device has published or pulled it before.
 - **Pull notes from site.** Notes that are missing locally are downloaded. Notes the site has changed, and you have not, are updated. If both sides changed, neither side is overwritten.
+- **Pull automatically.** On by default. A few seconds after the workspace is ready, then every 5 minutes, the plugin pulls while Obsidian is open. It uses the same rules as **Pull notes from site**, including conflict copies, so unpublished local edits are not overwritten. Nothing is announced when the vault is already current. A short notice appears when notes were downloaded or a conflict file was saved. If a pull fails (the phone is offline, for example), that error is shown once and then stays quiet until a later pull succeeds.
 - **Publish on save.** Optional. Off until you turn it on. After Obsidian saves a note in the sync folder, the plugin waits 1.5 seconds and publishes it.
 - **Test connection.** The settings tab lists how many notes the site currently has.
 
@@ -46,6 +47,8 @@ There is no delete. Removing a note stays in Studio on the site.
 | API token | empty | The `NOTES_API_TOKEN` bearer token. The field is masked. |
 | Vault folder | `oddava.me` | Only notes under this folder sync. |
 | Publish on save | off | Debounced publish after a save. |
+| Pull automatically | on | Repeating pull while Obsidian is open. |
+| Auto-pull interval | 5 minutes | At least 1 minute between pulls. |
 
 `oddava.me/diary/hello.md` in the vault is `diary/hello.md` on the site. Every folder and file name under the sync folder has to be lowercase kebab-case (`reading/atomic-habits.md`, `diary/06-10-2026.md`). Spaces, capitals, and underscores are rejected before a request is sent. That is the same rule the API uses.
 
@@ -102,6 +105,12 @@ Pull asks for the list, then fetches a note only when the list says it needs a c
 
 `updated` lives in the note frontmatter. The server sets it on every save. The plugin does not invent one when you type.
 
+Automatic pull runs that same pass. It starts a few seconds after the workspace layout is ready, then repeats on the interval in settings (5 minutes by default, and never less than 1). Turn it off with **Pull automatically**. **Pull notes from site** still works and still shows the full summary, including notes that were left unchanged.
+
+An automatic pull does not start while another pull is already running. The next interval tries again. **Pull notes from site** waits for the one in progress to finish, then runs.
+
+No notice when every note was already in sync, or when local edits were left unpublished. A short notice when at least one note was downloaded or a conflict file was written. The same failure is not announced again on later intervals. It is announced again after a pull succeeds, so a new outage is not silent forever. With no token, or no site URL, automatic pull does nothing and shows nothing.
+
 Deleting a note in the vault does not delete it on the site. The next pull downloads it again. Delete from Studio if it should leave the garden.
 
 ## Frontmatter
@@ -116,9 +125,11 @@ Publish sends the Markdown you wrote. It does not rewrite your vault file with t
 
 `isDesktopOnly` is `false`. HTTP goes through Obsidian’s `requestUrl`, which exists on iOS and Android. The plugin does not import Node, Electron, or `fetch`. There is no status-bar item, because that API is desktop-only.
 
+The repeating pull uses `window.setInterval`, registered with Obsidian’s `registerInterval` so it is cleared when the plugin unloads. Changing **Pull automatically** or the interval clears the previous timer and starts a new one. A phone that is offline does not get a notice on every attempt.
+
 Plugin data, including the token, lives on each device unless you sync `.obsidian`. A phone that has the plugin but no token can open a setup link instead of typing the token. The handler uses the same settings screen as the desktop app.
 
-The site allows 120 requests a minute. A pull is one list plus one fetch per note that actually changed. Over the limit, the plugin stops and shows `Retry-After` rather than looping.
+The site allows 120 requests a minute. A pull is one list plus one fetch per note that actually changed. The automatic interval is at least one minute so those pulls are not stacked in a tight loop. Over the limit, the plugin stops and shows `Retry-After` rather than looping. An automatic pull shows that error once, not on every later interval, until a pull succeeds.
 
 ## Develop
 
@@ -128,7 +139,7 @@ npm test
 npm run build
 ```
 
-`npm test` runs the path mapping and sync tests with a fake notes API. `npm run build` typechecks, bundles `src/main.ts` to `main.js` with esbuild, and checks that the bundle does not call Node or `fetch`.
+`npm test` runs the path mapping, sync, and auto-pull tests with a fake notes API and a fake clock. `npm run build` typechecks, bundles `src/main.ts` to `main.js` with esbuild, and checks that the bundle does not call Node or `fetch`.
 
 `npm run dev` watches and rebuilds while you work.
 
@@ -153,3 +164,5 @@ Create is the path for “I have no revision.” A lost response can still have 
 Rate limiting and the disabled-API response are shown as notices, not thrown away. `content_busy` means the mutation lock is held; try again rather than stacking another write. The body cap is 1 MB, checked before the request so a huge note does not spend the token on a `413`.
 
 A second device should not have to type the token. Obsidian can open `obsidian://oddava-notes-setup?...` and pass the query string to the plugin. The token is a query parameter because that is the channel a phone and a computer already share. The plugin writes it into plugin data and does not print it. The link is a secret, the same way `data.json` is a secret.
+
+Automatic pull is the same function as **Pull notes from site**. The schedule is a short timeout after the layout is ready, plus an interval. Both are cancelled on unload and when the toggle or the interval changes. A pull in progress holds a lock. The interval does not start a second one; the command runs after the lock clears. Notices on the automatic path are filtered. No vault change and no new error means silence, so a phone in a pocket does not toast “already up to date” or the same offline error every five minutes. Conflict copies are unchanged: unpublished local edits stay in the note, and the site copy is written beside it.

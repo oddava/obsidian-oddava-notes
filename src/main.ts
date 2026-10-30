@@ -1,5 +1,15 @@
 import { MarkdownView, Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { NotesClient } from './api';
+import {
+	canAutoPull,
+	createAutoPullSchedule,
+	createPullGate,
+	noticeForAutoPull,
+	quietAutoPullNotice,
+	type AutoPullNotice,
+	type AutoPullSchedule,
+	type PullSource,
+} from './auto-pull';
 import { createDebouncer, PUBLISH_DEBOUNCE_MS, type Debouncer } from './debounce';
 import { explainError, redact } from './messages';
 import { createObsidianHttp } from './obsidian-http';
@@ -19,7 +29,7 @@ import { readUpdated } from './frontmatter';
 import { mergeSettings, type OddavaSettings } from './settings-data';
 import { OddavaSettingTab, type OddavaHost } from './settings';
 import { buildSetupLink, parseSetupLink, SETUP_ACTION, SETUP_LINK_COPIED } from './setup-link';
-import { publishNote, pullFromSite, summarizePull, testConnection } from './sync';
+import { publishNote, pullFromSite, summarizePull, testConnection, type PullResult } from './sync';
 import type { HttpClient } from './types';
 import type { LocalNote } from './sync';
 
@@ -32,6 +42,28 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 	});
 	private readonly tails = new Map<string, Promise<void>>();
 	private readonly remoteWrites = new Set<string>();
+	private readonly pulls = createPullGate();
+	private readonly autoPull: AutoPullSchedule = createAutoPullSchedule({
+		enabled: () => this.alive && this.settings.autoPull,
+		intervalMinutes: () => this.settings.autoPullIntervalMinutes,
+		pull: () => {
+			if (!this.alive) return;
+			void this.pullFromSite('auto');
+		},
+		timers: {
+			setTimeout: (callback, ms) => {
+				const id = window.setTimeout(callback, ms);
+				return { cancel: () => window.clearTimeout(id) };
+			},
+			setInterval: (callback, ms) => {
+				const id = window.setInterval(callback, ms);
+				this.registerInterval(id);
+				return { cancel: () => window.clearInterval(id) };
+			},
+		},
+	});
+	/** Last automatic-pull failure that was announced. Same text stays quiet. */
+	private lastAutoPullError: string | null = null;
 	private alive = true;
 	private settingTab!: OddavaSettingTab;
 
@@ -54,7 +86,7 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			id: 'pull-notes-from-site',
 			name: 'Pull notes from site',
 			callback: () => {
-				void this.pullFromSite();
+				void this.pullFromSite('manual');
 			},
 		});
 
@@ -67,11 +99,21 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 
 		this.registerEvent(this.app.vault.on('create', (file) => this.onVaultFile(file)));
 		this.registerEvent(this.app.vault.on('modify', (file) => this.onVaultFile(file)));
+
+		this.app.workspace.onLayoutReady(() => {
+			if (!this.alive) return;
+			this.autoPull.arm();
+		});
 	}
 
 	onunload(): void {
 		this.alive = false;
+		this.autoPull.stop();
 		this.debouncer.cancelAll();
+	}
+
+	refreshAutoPull(): void {
+		this.autoPull.reconfigure();
 	}
 
 	async loadSettings(): Promise<void> {
@@ -135,40 +177,89 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		this.enqueue(file.path, () => this.publishFile(file, 'command'));
 	}
 
-	private async pullFromSite(): Promise<void> {
-		if (!(await this.ensureSyncFolder())) return;
-		const working = new Notice('Pulling notes from the site…', 0);
+	private async pullFromSite(source: PullSource): Promise<void> {
+		if (!this.alive) return;
+		const working = source === 'manual' ? new Notice('Pulling notes from the site…', 0) : null;
 		try {
-			await this.withClient(async (client) => {
+			await this.pulls.run(source, () => this.executePull(source));
+		} finally {
+			working?.hide();
+		}
+	}
+
+	/**
+	 * Manual and automatic pulls share this path, including conflict copies.
+	 * A manual pull always summarizes. An automatic pull stays quiet unless
+	 * notes were downloaded, a conflict file was written, or a new error appeared.
+	 */
+	private async executePull(source: PullSource): Promise<void> {
+		if (!this.alive) return;
+		if (source === 'auto' && !canAutoPull(this.settings)) return;
+		if (!(await this.ensureSyncFolder(source))) return;
+		await this.withClient(
+			async (client) => {
 				const result = await pullFromSite(client, (apiPath) => this.readLocal(apiPath));
 				if (!this.alive) return;
+				const saved = { dirty: false };
 				try {
-					for (const note of result.downloaded) {
-						await this.writeVaultFile(note.vaultPath, note.content);
-						this.settings.synced[note.apiPath] = {
-							revision: note.revision,
-							fingerprint: note.fingerprint,
-						};
-						delete this.settings.conflictRevisions[note.apiPath];
-					}
-					for (const note of result.aligned) {
-						this.settings.synced[note.apiPath] = {
-							revision: note.revision,
-							fingerprint: note.fingerprint,
-						};
-					}
-					for (const conflict of result.conflicts) {
-						await this.writeVaultFile(conflict.conflictVaultPath, conflict.remote.content);
-						this.settings.conflictRevisions[conflict.apiPath] = conflict.remote.revision;
-					}
+					await this.applyPull(result, saved);
 				} finally {
-					await this.saveSettings();
+					if (saved.dirty) await this.saveSettings();
 				}
-				this.notify(summarizePull(result), 10000);
-			});
-		} finally {
-			working.hide();
+				if (!this.alive) return;
+				if (source === 'manual') {
+					this.lastAutoPullError = result.stoppedEarly?.trim() ? result.stoppedEarly : null;
+					this.notify(summarizePull(result), 10000);
+					return;
+				}
+				this.reportAutoPull(noticeForAutoPull(this.lastAutoPullError, result));
+			},
+			(message) => {
+				if (source === 'auto') {
+					this.reportAutoFailure(message);
+					return;
+				}
+				this.lastAutoPullError = message;
+				this.notify(message, 8000);
+			},
+		);
+	}
+
+	private async applyPull(result: PullResult, saved: { dirty: boolean }): Promise<void> {
+		for (const note of result.downloaded) {
+			await this.writeVaultFile(note.vaultPath, note.content);
+			this.settings.synced[note.apiPath] = {
+				revision: note.revision,
+				fingerprint: note.fingerprint,
+			};
+			delete this.settings.conflictRevisions[note.apiPath];
+			saved.dirty = true;
 		}
+		for (const note of result.aligned) {
+			const current = this.settings.synced[note.apiPath];
+			if (current?.revision === note.revision && current.fingerprint === note.fingerprint) continue;
+			this.settings.synced[note.apiPath] = {
+				revision: note.revision,
+				fingerprint: note.fingerprint,
+			};
+			saved.dirty = true;
+		}
+		for (const conflict of result.conflicts) {
+			await this.writeVaultFile(conflict.conflictVaultPath, conflict.remote.content);
+			this.settings.conflictRevisions[conflict.apiPath] = conflict.remote.revision;
+			saved.dirty = true;
+		}
+	}
+
+	private reportAutoFailure(message: string): void {
+		this.reportAutoPull(
+			quietAutoPullNotice(this.lastAutoPullError, { changed: null, error: message }),
+		);
+	}
+
+	private reportAutoPull(feedback: AutoPullNotice): void {
+		this.lastAutoPullError = feedback.remember;
+		if (feedback.notice) this.notify(feedback.notice, 8000);
 	}
 
 	private onVaultFile(file: TAbstractFile): void {
@@ -203,7 +294,7 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			return;
 		}
 
-		if (!(await this.ensureSyncFolder())) return;
+		if (!(await this.ensureSyncFolder('manual'))) return;
 
 		if (!pathInsideSyncFolder(this.settings.syncFolder, file.path)) {
 			if (source === 'command') this.offerToMove(file);
@@ -383,20 +474,25 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		await this.publishFile(moved, 'command');
 	}
 
-	private async ensureSyncFolder(): Promise<boolean> {
+	private async ensureSyncFolder(source: PullSource): Promise<boolean> {
 		const folder = normalizeSyncFolder(this.settings.syncFolder);
 		const problem = folderProblem(this.settings.syncFolder);
 		if (problem || !folder) {
-			this.notify(problem ?? 'Set a vault folder to sync.', 8000);
+			this.reportPullProblem(source, problem ?? 'Set a vault folder to sync.');
 			return false;
 		}
 		try {
 			await this.ensureFolder(`${folder}/note.md`);
 			return true;
 		} catch (error) {
-			this.notify(explainError(error), 8000);
+			this.reportPullProblem(source, explainError(error));
 			return false;
 		}
+	}
+
+	private reportPullProblem(source: PullSource, message: string): void {
+		if (source === 'auto') this.reportAutoFailure(message);
+		else this.notify(message, 8000);
 	}
 
 	private assertInsideSyncFolder(vaultPath: string): void {
@@ -427,18 +523,22 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		}
 	}
 
-	private async withClient(run: (client: NotesClient) => Promise<void>): Promise<void> {
+	private async withClient(
+		run: (client: NotesClient) => Promise<void>,
+		onError?: (message: string) => void,
+	): Promise<void> {
+		const report = onError ?? ((message: string) => this.notify(message, 8000));
 		let client: NotesClient;
 		try {
 			client = new NotesClient(this.http, this.settings.baseUrl, this.settings.apiToken);
 		} catch (error) {
-			this.notify(explainError(error), 8000);
+			report(explainError(error));
 			return;
 		}
 		try {
 			await run(client);
 		} catch (error) {
-			this.notify(explainError(error), 8000);
+			report(explainError(error));
 		}
 	}
 

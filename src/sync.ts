@@ -236,7 +236,8 @@ export async function pullFromSite(
 	return result;
 }
 
-export function summarizePull(result: PullResult): string {
+/** Downloads and conflict copies only. Null when the vault text did not change. */
+export function summarizeChangedNotes(result: PullResult): string | null {
 	const created = result.downloaded.filter((note) => note.reason === 'new').length;
 	const updated = result.downloaded.filter((note) => note.reason === 'newer').length;
 	const parts: string[] = [];
@@ -252,11 +253,18 @@ export function summarizePull(result: PullResult): string {
 			.map((conflict) => vaultBasename(conflict.conflictVaultPath));
 		const extra =
 			result.conflicts.length > 3 ? `, and ${result.conflicts.length - 3} more` : '';
-		const label = result.conflicts.length === 1 ? 'a site conflict' : `${result.conflicts.length} site conflicts`;
-		parts.push(
-			`Saved ${label} (${names.join(', ')}${extra}). Neither side was overwritten.`,
-		);
+		const label =
+			result.conflicts.length === 1 ? 'a site conflict' : `${result.conflicts.length} site conflicts`;
+		parts.push(`Saved ${label} (${names.join(', ')}${extra}). Neither side was overwritten.`);
 	}
+	if (parts.length === 0) return null;
+	return parts.join(' ');
+}
+
+export function summarizePull(result: PullResult): string {
+	const parts: string[] = [];
+	const changed = summarizeChangedNotes(result);
+	if (changed) parts.push(changed);
 	if (result.skipped.length > 0) {
 		parts.push(
 			`Left ${result.skipped.length} ${result.skipped.length === 1 ? 'note' : 'notes'} in the vault unchanged.`,
