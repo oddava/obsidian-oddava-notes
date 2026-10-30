@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
+import { contentFingerprint } from './fingerprint';
 import { describe, expect, it } from 'vitest';
 import { NotesClient, toApiError } from './api';
+import { NotesApiError } from './errors';
 import { findRemoteMoves, pullFromSite } from './sync';
 import type { HttpResponse } from './types';
 import {
@@ -8,7 +10,14 @@ import {
 	KEEP_ON_SITE,
 	bulkDeletePrompt,
 	createMoveChain,
+	createRestartingBatcher,
 	leftFolderPrompt,
+	performRestore,
+	probeSaysTrashed,
+	runUntilRateLimit,
+	shouldAdoptMove,
+	SITE_DELETE_DEBOUNCE_MS,
+	summarizeTrashRun,
 	planDeleteBatch,
 	planRemoteReconcile,
 	planRestore,
@@ -392,5 +401,150 @@ describe('notes client move and delete', () => {
 		const garden = await client.listGarden();
 		expect(garden.deleted[0]?.path).toBe('diary/old.md');
 		expect((await client.listGarden()).deleted).toEqual([]);
+	});
+});
+
+describe('delete batch window', () => {
+	it('restarts a 750ms wait so one-by-one deletes become one prompt under always', () => {
+		expect(SITE_DELETE_DEBOUNCE_MS).toBe(750);
+		let now = 0;
+		const timers: { at: number; run: () => void; cancelled: boolean }[] = [];
+		const flushed: string[][] = [];
+		const batcher = createRestartingBatcher<{ apiPath: string }>(
+			SITE_DELETE_DEBOUNCE_MS,
+			(callback, ms) => {
+				const timer = { at: now + ms, run: callback, cancelled: false };
+				timers.push(timer);
+				return () => {
+					timer.cancelled = true;
+				};
+			},
+			(items) => flushed.push(items.map((item) => item.apiPath)),
+		);
+		const fire = (until: number) => {
+			now = until;
+			for (const timer of timers) {
+				if (!timer.cancelled && timer.at <= now) timer.run();
+			}
+		};
+		batcher.push({ apiPath: 'a.md' });
+		fire(400);
+		batcher.push({ apiPath: 'b.md' });
+		fire(400 + 749);
+		expect(flushed).toEqual([]);
+		fire(400 + 750);
+		expect(flushed).toEqual([['a.md', 'b.md']]);
+		expect(planDeleteBatch({ count: 2, setting: 'always', leftFolder: false })).toBe('ask');
+	});
+
+	it('trashes confirmed deletes one at a time and stops on 429', async () => {
+		const calls: string[] = [];
+		const run = await runUntilRateLimit(['a.md', 'b.md', 'c.md'], async (apiPath) => {
+			calls.push(apiPath);
+			if (apiPath === 'b.md') return { rateLimited: 'wait' };
+			return 'ok';
+		});
+		expect(calls).toEqual(['a.md', 'b.md']);
+		expect(run.rateLimited).toBe(true);
+		expect(run.notFinished.map((item) => item)).toEqual(['b.md', 'c.md']);
+		expect(
+			summarizeTrashRun({
+				trashed: ['a.md'],
+				failed: [],
+				notFinished: ['b.md', 'c.md'],
+				rateLimited: true,
+			}),
+		).toMatch(/Trashed 1 of 3/);
+		expect(
+			summarizeTrashRun({
+				trashed: ['a.md'],
+				failed: [{ apiPath: 'b.md', message: 'busy' }],
+				notFinished: [],
+				rateLimited: false,
+			}),
+		).toMatch(/Failed: b.md \(busy\)/);
+	});
+});
+
+describe('second device already moved the note', () => {
+	it('treats a 404 on move as success when the destination note is already there', async () => {
+		const requests: string[] = [];
+		const synced: Record<string, { revision: string; fingerprint: string }> = {
+			'diary/hello.md': { revision: 'r1', fingerprint: 'fp' },
+		};
+		const client = new NotesClient(async (request) => {
+			requests.push(`${request.method} ${request.url}`);
+			if (request.url.endsWith('/move')) {
+				return {
+					status: 404,
+					headers: {},
+					body: { code: 'not_found', error: 'missing' },
+				};
+			}
+			return {
+				status: 200,
+				headers: {},
+				body: {
+					note: {
+						path: 'reading/hello.md',
+						title: 'hello',
+						updated: '2026-10-30T00:00:00.000Z',
+						revision: 'r9',
+						content: '# hello\n',
+					},
+				},
+			};
+		}, 'https://oddava.me', 'notes-api-token');
+		let adopted: string | null = null;
+		try {
+			await client.move('diary/hello.md', 'reading/hello.md', 'r1');
+		} catch (error) {
+			expect(shouldAdoptMove(error as NotesApiError)).toBe(true);
+			adopted = await client.get('reading/hello.md').then((note) => note.revision);
+		}
+		expect(adopted).toBe('r9');
+		expect(requests[0]).toMatch(/POST/);
+		expect(requests[1]).toMatch(/GET/);
+		if (adopted) {
+			synced['reading/hello.md'] = { revision: adopted, fingerprint: synced['diary/hello.md']!.fingerprint };
+			delete synced['diary/hello.md'];
+		}
+		expect(synced['reading/hello.md']?.revision).toBe('r9');
+		expect(synced['diary/hello.md']).toBeUndefined();
+		expect(probeSaysTrashed(toApiError({ status: 410, headers: {}, body: { code: 'gone', error: 'x' } }))).toBe(
+			true,
+		);
+	});
+});
+
+describe('restore with local changes', () => {
+	it('does not overwrite the vault file and publishes the local text instead', async () => {
+		const files = new Map<string, string>([['oddava.me/diary/hello.md', '# hello\n\nlocal edits']]);
+		const writes: string[] = [];
+		const outcome = await performRestore({
+			label: 'diary/hello.md',
+			vaultPath: 'oddava.me/diary/hello.md',
+			restoredContent: '# hello\n\nold trash',
+			restoredRevision: 'r2',
+			localContent: files.get('oddava.me/diary/hello.md') ?? null,
+			syncedFingerprint: 'remembered',
+			fingerprint: contentFingerprint,
+			preserve: (_local, incoming) => incoming,
+			conflictPath: 'oddava.me/diary/hello (site conflict).md',
+			write: async (path, content) => {
+				writes.push(path);
+				files.set(path, content);
+			},
+			publishLocal: async (content, revision) => {
+				expect(content).toBe('# hello\n\nlocal edits');
+				expect(revision).toBe('r2');
+				expect(files.get('oddava.me/diary/hello.md')).toBe('# hello\n\nlocal edits');
+				return { ok: true, revision: 'r3', fingerprint: contentFingerprint(content) };
+			},
+		});
+		expect(outcome.wroteOriginal).toBe(false);
+		expect(writes).toEqual(['oddava.me/diary/hello (site conflict).md']);
+		expect(files.get('oddava.me/diary/hello (site conflict).md')).toBe('# hello\n\nold trash');
+		expect(outcome.synced.revision).toBe('r3');
 	});
 });

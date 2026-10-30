@@ -31,3 +31,7 @@ export function isFatalApiError(error: unknown): boolean {
 	if (error.status === 401 || error.status === 413 || error.status === 503) return true;
 	return error.code === 'rate_limited';
 }
+
+export function isRateLimited(error: unknown): boolean {
+	return error instanceof NotesApiError && (error.status === 429 || error.code === 'rate_limited');
+}

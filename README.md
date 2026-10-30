@@ -163,19 +163,21 @@ A note that is in the site trash is not downloaded again. If you left it on the 
 
 Renaming a note inside the sync folder calls `POST /api/notes/move` with the revision this device remembers. The old public URL redirects to the new one. The vault file has already moved; the plugin tells the site to follow it.
 
-Moving a note out of the sync folder is treated like a delete: the file stays where you put it, and the plugin always asks what to do with the site copy, even when **When a note is deleted** is set to always. Moving a note into the sync folder is a new note. It is published only when **Publish on save** is on, the same as creating a file there. A quick series of renames is sent in order, each one using the revision from the move before it.
+Moving a note out of the sync folder is treated like a delete: the file stays where you put it, and the plugin always asks what to do with the site copy, even when **When a note is deleted** is set to always. Moving a note into the sync folder is a new note. It is published only when **Publish on save** is on, the same as creating a file there. A quick series of renames of one note is sent in order, each one using the revision from the move before it. Renaming a folder moves the notes inside it one at a time. If the site starts rate limiting, the plugin stops and says how many moved.
+
+If another device already renamed the note, a move that comes back `404` or “that path already exists” checks the destination. When the note is there, the plugin updates its local mapping and does not treat it as a failure. If the note is already in the trash, a delete does not ask again.
 
 Deleting a synced note in the vault does not delete it on the site by itself. **When a note is deleted** chooses:
 
 - **Ask** (the default). A dialog offers **Delete on site too** and **Keep on site**.
-- **Always delete on the site.** One note you delete goes to the trash without a dialog. This also applies to a delete made by a sync tool. Deleting several notes at once, including a folder, still asks first.
+- **Always delete on the site.** One note you delete goes to the trash without a dialog. This also applies to a delete made by a sync tool. Deletes that arrive within about a second are one batch, so a sync tool removing notes one by one still asks once. Deleting several notes at once, including a folder, still asks first. Confirmed deletes run one at a time and stop if the site rate-limits, then report how many were trashed.
 - **Keep on the site.** The garden keeps the note. The next pull can download it again.
 
 If the vault file changed since the last sync, **Restore** does not overwrite it. The trash copy is saved beside the note, and your text is published onto the revision the restore just created.
 
 A site delete is soft. The note leaves the garden and stays in the trash, and it can be restored. The list endpoint returns those notes in `deleted`, separate from `notes`. Pull does not recreate a note that is in that trash. If you had it synced, the plugin stops tracking it and says it was left in the trash.
 
-If the site renamed a note (Studio, or another device), pull follows `409 moved` and `location`: it renames the vault file when the destination is free and points the remembered revision at the new path. `410 gone` means the note is in the trash. The notice offers **Restore**, which calls `POST /api/notes/restore`. `409 deleted` means a trashed note still holds that path, so create and move will not overwrite it. Restore it, or pick another path. Those three are not reported as a bare HTTP status.
+If the site renamed a note (Studio, or another device), pull follows `409 moved` and `location`: it renames the vault file when the destination is free and points the remembered revision at the new path. A publish that was waiting on the old path is moved onto the new one. `410 gone` means the note is in the trash. The notice offers **Restore**, which calls `POST /api/notes/restore`. If your vault copy changed since the last sync, restore does not overwrite it. `409 deleted` means a trashed note still holds that path, so create and move will not overwrite it. A delete of a path the site has since renamed follows `409 moved` and deletes the note where it lives now. Those responses are not reported as a bare HTTP status.
 
 ## Frontmatter
 
@@ -207,7 +209,7 @@ npm run build
 
 `npm run dev` watches and rebuilds while you work.
 
-`npm version 1.0.3` runs `version-bump.mjs` (also `npm run version-bump`), which writes that version into `manifest.json` and `versions.json`. Push a tag with the same number and no `v` prefix (`1.0.3`, not `v1.0.3`). The release workflow checks the tag against the manifest, then publishes `main.js`, `manifest.json`, and `styles.css`.
+`npm version 1.0.4` runs `version-bump.mjs` (also `npm run version-bump`), which writes that version into `manifest.json` and `versions.json`. Push a tag with the same number and no `v` prefix (`1.0.4`, not `v1.0.4`). The release workflow checks the tag against the manifest, then publishes `main.js`, `manifest.json`, and `styles.css`.
 
 The layout follows the official sample plugin: `src/main.ts`, `esbuild.config.mjs`, `manifest.json`, `versions.json`, `styles.css`, `version-bump.mjs`.
 

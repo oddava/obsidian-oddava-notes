@@ -1,4 +1,8 @@
+import { isRateLimited, NotesApiError } from './errors';
 import { parseApiPath, pathInsideSyncFolder, toApiPath } from './paths';
+
+/** One-by-one deletes from a sync tool still land in a single prompt. */
+export const SITE_DELETE_DEBOUNCE_MS = 750;
 
 export type SiteDeleteSetting = 'ask' | 'always' | 'never';
 
@@ -106,6 +110,196 @@ export function planRestore(input: {
 	if (!input.localFingerprint || !input.syncedFingerprint) return 'keep-local';
 	if (input.localFingerprint !== input.syncedFingerprint) return 'keep-local';
 	return 'write-restored';
+}
+
+export interface SiteDeleteItem {
+	apiPath: string;
+	revision: string;
+	kind: 'deleted' | 'left-folder';
+}
+
+/** Restarts the wait on every push, so a burst stays one batch. */
+export function createRestartingBatcher<T>(
+	waitMs: number,
+	setTimer: (callback: () => void, ms: number) => () => void,
+	onFlush: (items: T[]) => void,
+): { push(item: T): void; cancel(): void } {
+	let queue: T[] = [];
+	let cancelTimer: (() => void) | null = null;
+	return {
+		push(item) {
+			queue.push(item);
+			cancelTimer?.();
+			cancelTimer = setTimer(() => {
+				cancelTimer = null;
+				const batch = queue;
+				queue = [];
+				onFlush(batch);
+			}, waitMs);
+		},
+		cancel() {
+			cancelTimer?.();
+			cancelTimer = null;
+		},
+	};
+}
+
+export interface TrashRun {
+	trashed: string[];
+	failed: { apiPath: string; message: string }[];
+	notFinished: string[];
+	rateLimited: boolean;
+}
+
+export function summarizeTrashRun(result: TrashRun): string {
+	const total = result.trashed.length + result.failed.length + result.notFinished.length;
+	if (total === 1 && result.trashed.length === 1) {
+		return `Moved ${result.trashed[0]} to the site trash. It can be restored.`;
+	}
+	const parts = [`Trashed ${result.trashed.length} of ${total}.`];
+	if (result.rateLimited) parts.push('Stopped because the site is rate limiting.');
+	if (result.failed.length > 0) {
+		const details = result.failed.map((item) => `${item.apiPath} (${item.message})`).join('; ');
+		parts.push(`Failed: ${details}.`);
+	}
+	if (result.notFinished.length > 0) {
+		parts.push(`Not finished: ${result.notFinished.join(', ')}.`);
+	}
+	if (result.trashed.length > 0) parts.push('Trashed notes can be restored.');
+	return parts.join(' ');
+}
+
+export function summarizeMoveRun(input: {
+	moved: number;
+	total: number;
+	failed: { apiPath: string; message: string }[];
+	notFinished: string[];
+	rateLimited: boolean;
+}): string {
+	const parts = [`Moved ${input.moved} of ${input.total} notes on the site.`];
+	if (input.rateLimited) parts.push('Stopped because the site is rate limiting.');
+	if (input.failed.length > 0) {
+		const details = input.failed.map((item) => `${item.apiPath} (${item.message})`).join('; ');
+		parts.push(`Failed: ${details}.`);
+	}
+	if (input.notFinished.length > 0) parts.push(`Not finished: ${input.notFinished.join(', ')}.`);
+	return parts.join(' ');
+}
+
+/** A move that missed because another device already renamed the note. */
+export function shouldAdoptMove(error: NotesApiError): boolean {
+	return (
+		error.status === 404 ||
+		error.code === 'not_found' ||
+		error.code === 'path_exists' ||
+		error.code === 'slug_exists'
+	);
+}
+
+export function probeSaysTrashed(error: unknown): boolean {
+	return (
+		error instanceof NotesApiError &&
+		(error.code === 'gone' || error.code === 'deleted' || error.status === 410)
+	);
+}
+
+export function probeSaysMissing(error: unknown): boolean {
+	return error instanceof NotesApiError && (error.code === 'not_found' || error.status === 404);
+}
+
+export function isRateLimitFailure(error: unknown): boolean {
+	return isRateLimited(error);
+}
+
+export async function runUntilRateLimit<T>(
+	items: readonly T[],
+	step: (item: T) => Promise<'ok' | { rateLimited: string } | { failed: string }>,
+): Promise<{
+	succeeded: number;
+	failed: { item: T; message: string }[];
+	notFinished: T[];
+	rateLimited: boolean;
+}> {
+	const failed: { item: T; message: string }[] = [];
+	for (let index = 0; index < items.length; index += 1) {
+		const item = items[index];
+		if (!item) continue;
+		const result = await step(item);
+		if (result === 'ok') continue;
+		if ('rateLimited' in result) {
+			return {
+				succeeded: index - failed.length,
+				failed,
+				notFinished: items.slice(index),
+				rateLimited: true,
+			};
+		}
+		failed.push({ item, message: result.failed });
+	}
+	return {
+		succeeded: items.length - failed.length,
+		failed,
+		notFinished: [],
+		rateLimited: false,
+	};
+}
+
+export async function performRestore(input: {
+	label: string;
+	vaultPath: string;
+	restoredContent: string;
+	restoredRevision: string;
+	localContent: string | null;
+	syncedFingerprint?: string;
+	fingerprint: (text: string) => string;
+	preserve: (local: string, incoming: string) => string;
+	conflictPath: string;
+	write: (path: string, content: string) => Promise<void>;
+	publishLocal: (
+		content: string,
+		revision: string,
+	) => Promise<{ ok: true; revision: string; fingerprint: string } | { ok: false; message: string }>;
+}): Promise<{
+	notice: string;
+	synced: { revision: string; fingerprint: string };
+	conflictRevision?: string;
+	wroteOriginal: boolean;
+}> {
+	const plan = planRestore({
+		localExists: input.localContent !== null,
+		localFingerprint: input.localContent !== null ? input.fingerprint(input.localContent) : undefined,
+		syncedFingerprint: input.syncedFingerprint,
+	});
+	if (plan === 'write-restored') {
+		const content =
+			input.localContent !== null
+				? input.preserve(input.localContent, input.restoredContent)
+				: input.restoredContent;
+		await input.write(input.vaultPath, content);
+		return {
+			wroteOriginal: true,
+			synced: { revision: input.restoredRevision, fingerprint: input.fingerprint(content) },
+			notice: `Restored ${input.label} from the site trash.`,
+		};
+	}
+	await input.write(input.conflictPath, input.restoredContent);
+	const published = await input.publishLocal(input.localContent ?? '', input.restoredRevision);
+	if (published.ok) {
+		return {
+			wroteOriginal: false,
+			synced: { revision: published.revision, fingerprint: published.fingerprint },
+			notice: `Kept your edits in ${input.label}. Saved the restored copy beside the note and published your text.`,
+		};
+	}
+	return {
+		wroteOriginal: false,
+		synced: {
+			revision: input.restoredRevision,
+			fingerprint: input.fingerprint(input.restoredContent),
+		},
+		conflictRevision: input.restoredRevision,
+		notice: `Restored ${input.label} on the site, kept your local edits, and saved the site copy beside the note. ${published.message}`,
+	};
 }
 
 export interface MoveChainState {
