@@ -1,3 +1,19 @@
+/** Floor so a pull cannot loop inside the site's 120 requests/minute limit. */
+export const MIN_AUTO_PULL_MINUTES = 1;
+
+export const DEFAULT_AUTO_PULL_MINUTES = 5;
+
+export function clampAutoPullMinutes(value: unknown): number {
+	const numeric =
+		typeof value === 'number'
+			? value
+			: typeof value === 'string' && value.trim()
+				? Number(value.trim())
+				: Number.NaN;
+	if (!Number.isFinite(numeric)) return DEFAULT_AUTO_PULL_MINUTES;
+	return Math.max(MIN_AUTO_PULL_MINUTES, Math.round(numeric));
+}
+
 export interface SyncedNote {
 	revision: string;
 	fingerprint: string;
@@ -8,6 +24,10 @@ export interface OddavaSettings {
 	apiToken: string;
 	syncFolder: string;
 	publishOnSave: boolean;
+	/** Pull while Obsidian is open. On unless the saved settings turn it off. */
+	autoPull: boolean;
+	/** Minutes between automatic pulls. Clamped to at least one minute. */
+	autoPullIntervalMinutes: number;
 	synced: Record<string, SyncedNote>;
 	/** Site revision captured when a conflict file was written for this API path. */
 	conflictRevisions: Record<string, string>;
@@ -19,6 +39,8 @@ export function defaultSettings(): OddavaSettings {
 		apiToken: '',
 		syncFolder: 'oddava.me',
 		publishOnSave: false,
+		autoPull: true,
+		autoPullIntervalMinutes: DEFAULT_AUTO_PULL_MINUTES,
 		synced: {},
 		conflictRevisions: {},
 	};
@@ -38,6 +60,8 @@ export function mergeSettings(stored: unknown): OddavaSettings {
 				? stored.syncFolder
 				: defaults.syncFolder,
 		publishOnSave: stored.publishOnSave === true,
+		autoPull: typeof stored.autoPull === 'boolean' ? stored.autoPull : defaults.autoPull,
+		autoPullIntervalMinutes: clampAutoPullMinutes(stored.autoPullIntervalMinutes),
 		synced: sanitizeSynced(stored.synced),
 		conflictRevisions: sanitizeStringMap(stored.conflictRevisions),
 	};

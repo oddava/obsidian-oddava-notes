@@ -1,13 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { defaultSettings, mergeSettings } from './settings-data';
+import {
+	clampAutoPullMinutes,
+	defaultSettings,
+	mergeSettings,
+	MIN_AUTO_PULL_MINUTES,
+} from './settings-data';
 
 describe('mergeSettings', () => {
-	it('starts with publish-on-save off and the public site', () => {
+	it('starts with publish-on-save off, auto-pull on, and the public site', () => {
 		const settings = defaultSettings();
 		expect(settings.publishOnSave).toBe(false);
+		expect(settings.autoPull).toBe(true);
+		expect(settings.autoPullIntervalMinutes).toBe(5);
 		expect(settings.baseUrl).toBe('https://oddava.me');
 		expect(settings.syncFolder).toBe('oddava.me');
 		expect(settings.apiToken).toBe('');
+	});
+
+	it('keeps an explicit auto-pull choice and raises a too-small interval', () => {
+		const settings = mergeSettings({
+			autoPull: false,
+			autoPullIntervalMinutes: 0,
+		});
+		expect(settings.autoPull).toBe(false);
+		expect(settings.autoPullIntervalMinutes).toBe(MIN_AUTO_PULL_MINUTES);
+		expect(clampAutoPullMinutes('12')).toBe(12);
+		expect(clampAutoPullMinutes('nope')).toBe(5);
+		expect(clampAutoPullMinutes(1.6)).toBe(2);
 	});
 
 	it('keeps a saved token and drops malformed sync memory', () => {

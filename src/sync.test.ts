@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { NotesClient } from './api';
 import { contentFingerprint } from './fingerprint';
-import { publishNote, pullFromSite, summarizePull, type LocalNote } from './sync';
+import {
+	publishNote,
+	pullFromSite,
+	summarizeChangedNotes,
+	summarizePull,
+	type LocalNote,
+	type PullResult,
+} from './sync';
 import { FakeSite } from '../test/fake-site';
 
 const folder = 'oddava.me';
@@ -356,6 +363,18 @@ describe('pullFromSite', () => {
 		expect(result.downloaded.length).toBeLessThan(3);
 		expect(result.stoppedEarly).toMatch(/rate limit/i);
 		expect(summarizePull(result)).toMatch(/Retry after 30/);
+	});
+
+	it('keeps the manual summary and stays silent when auto-pull changed nothing', () => {
+		const result: PullResult = {
+			downloaded: [],
+			aligned: [{ apiPath: 'diary/hello.md', revision: 'r1', fingerprint: 'abc' }],
+			conflicts: [],
+			skipped: [{ apiPath: 'diary/draft.md', reason: 'The vault note has unpublished edits.' }],
+		};
+		expect(summarizeChangedNotes(result)).toBeNull();
+		expect(summarizePull(result)).toMatch(/Left 1 note in the vault unchanged/);
+		expect(summarizePull(result)).not.toMatch(/Already up to date/);
 	});
 
 	it('reports a disabled API without downloading', async () => {
