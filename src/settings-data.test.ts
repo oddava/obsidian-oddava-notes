@@ -18,6 +18,29 @@ describe('mergeSettings', () => {
 		expect(settings.telegramBotToken).toBe('');
 		expect(settings.telegramChannel).toBe('@justoddava');
 		expect(settings.siteDelete).toBe('ask');
+		expect(settings.telegramFormat).toBe('full');
+		expect(settings.telegramLinkPreview).toBe('large-below');
+		expect(settings.telegramCoverImage).toBe(true);
+		expect(settings.telegramSilent).toBe(false);
+	});
+
+	it('keeps saved Telegram choices and drops unknown ones', () => {
+		const saved = mergeSettings({
+			telegramFormat: 'summary',
+			telegramLinkPreview: 'small-above',
+			telegramCoverImage: false,
+			telegramSilent: true,
+			telegramChannel: 'https://t.me/someone_else',
+		});
+		expect(saved).toMatchObject({
+			telegramFormat: 'summary',
+			telegramLinkPreview: 'small-above',
+			telegramCoverImage: false,
+			telegramSilent: true,
+			telegramChannel: '@someone_else',
+		});
+		const junk = mergeSettings({ telegramFormat: 'poem', telegramLinkPreview: 'huge', telegramCoverImage: 'yes' });
+		expect(junk).toMatchObject({ telegramFormat: 'full', telegramLinkPreview: 'large-below', telegramCoverImage: true });
 	});
 
 	it('keeps an explicit auto-pull choice and raises a too-small interval', () => {

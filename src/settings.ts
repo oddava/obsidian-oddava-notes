@@ -6,7 +6,14 @@ import {
 	MIN_AUTO_PULL_MINUTES,
 	type OddavaSettings,
 } from './settings-data';
-import { DEFAULT_TELEGRAM_CHANNEL, normalizeTelegramChannel } from './telegram';
+import {
+	DEFAULT_TELEGRAM_CHANNEL,
+	normalizeTelegramChannel,
+	TELEGRAM_FORMATS,
+	TELEGRAM_LINK_PREVIEWS,
+	telegramFormat,
+	telegramLinkPreview,
+} from './telegram';
 import { siteDeleteSetting } from './vault-sync';
 
 export interface OddavaHost {
@@ -14,6 +21,7 @@ export interface OddavaHost {
 	saveSettings(): Promise<void>;
 	testConnection(): Promise<void>;
 	copySetupLink(): Promise<void>;
+	testTelegram(): Promise<void>;
 	refreshAutoPull(): void;
 }
 
@@ -199,7 +207,7 @@ export class OddavaSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Telegram channel')
 			.setDesc(
-				'Where posts go. A public channel like @justoddava, or a numeric id. The bot has to be an admin there.',
+				'Where posts go. A public channel like @justoddava, a t.me link, or a numeric id. The bot has to be an admin there, allowed to post, edit, and delete messages.',
 			)
 			.addText((text) => {
 				text.setPlaceholder(DEFAULT_TELEGRAM_CHANNEL).setValue(this.plugin.settings.telegramChannel);
@@ -220,6 +228,70 @@ export class OddavaSettingTab extends PluginSettingTab {
 					void this.plugin.saveSettings();
 				});
 			});
+
+		new Setting(containerEl)
+			.setName('Telegram post')
+			.setDesc(
+				'Full note sends the whole note with its formatting, split into several messages when it is long. Summary sends the title, the first paragraph, and the link. A note can override this with telegram_format: full or summary.',
+			)
+			.addDropdown((dropdown) => {
+				for (const [value, label] of Object.entries(TELEGRAM_FORMATS)) dropdown.addOption(value, label);
+				dropdown.setValue(this.plugin.settings.telegramFormat);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.telegramFormat = telegramFormat(value) ?? 'full';
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Link preview')
+			.setDesc(
+				'The page’s card (title, image, description) under the post. Not shown when a cover photo is sent. A note can override this with telegram_preview, such as off or small-above.',
+			)
+			.addDropdown((dropdown) => {
+				for (const [value, label] of Object.entries(TELEGRAM_LINK_PREVIEWS)) dropdown.addOption(value, label);
+				dropdown.setValue(this.plugin.settings.telegramLinkPreview);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.telegramLinkPreview = telegramLinkPreview(value) ?? 'large-below';
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Cover photo')
+			.setDesc(
+				'Send the first image as a photo, with the post as its caption. It comes from telegram_image, cover, image, or banner in the frontmatter, or the first image in the note. JPG, PNG, or WebP, up to 10 MB. telegram_image: false turns it off for one note.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.telegramCoverImage).onChange(async (value) => {
+					this.plugin.settings.telegramCoverImage = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Post silently')
+			.setDesc('Subscribers get the post without a notification sound. Later messages of a long post are always silent.')
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.telegramSilent).onChange(async (value) => {
+					this.plugin.settings.telegramSilent = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Telegram check')
+			.setDesc('Checks the bot token, the channel, and the bot’s admin rights. It does not post anything.')
+			.addButton((button) =>
+				button.setButtonText('Test Telegram').onClick(() => {
+					button.setDisabled(true);
+					button.setButtonText('Testing…');
+					void this.plugin.testTelegram().finally(() => {
+						button.setDisabled(false);
+						button.setButtonText('Test Telegram');
+					});
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName('Another device')
