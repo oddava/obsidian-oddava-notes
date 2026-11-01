@@ -16,6 +16,8 @@ import {
 	packBlocks,
 	renderRuns,
 	runsToPlain,
+	splitRuns,
+	visibleLength,
 	TELEGRAM_CAPTION_LIMIT,
 	TELEGRAM_TEXT_LIMIT,
 	type Block,
@@ -36,6 +38,11 @@ export const NEARLY_EMPTY_CHARS = 40;
 
 /** Summary posts: the first paragraph, cut at a word near this length. */
 export const EXCERPT_MAX_CHARS = 280;
+
+/** A summary keeps adding blocks until it has at least this much text… */
+export const SUMMARY_MIN_CHARS = 160;
+/** …and never more than this. The page has the rest. */
+export const SUMMARY_MAX_CHARS = 600;
 
 /** Telegram's upload limit for photos. */
 export const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
@@ -248,11 +255,11 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 	const format = telegramFormat(meta.format) ?? input.format ?? 'full';
 	const linkPreview = telegramLinkPreview(meta.preview) ?? input.linkPreview ?? 'large-below';
 	const cover = input.cover ?? undefined;
-	const { title, excerpt } = noteTitleAndExcerpt(input.content, mapped.apiPath);
+	const { title } = noteTitleAndExcerpt(input.content, mapped.apiPath);
 	const blocks =
 		format === 'full'
 			? fullBlocks(input.content, title, url, { resolveNote: input.resolveNote })
-			: summaryBlocks(title, excerpt, url);
+			: summaryBlocks(input.content, title, url, { resolveNote: input.resolveNote });
 
 	const parts = buildParts(blocks, cover, url, linkPreview);
 	const textOnly = cover ? buildParts(blocks, undefined, url, linkPreview) : null;
@@ -323,12 +330,37 @@ export function fullBlocks(content: string, title: string, url: string, context:
 	return [titleBlock(title), ...blocks, footerBlock(url)];
 }
 
-/** Title in bold, the first paragraph, then a link to the page. */
-export function summaryBlocks(title: string, excerpt: string, url: string): Block[] {
-	const blocks: Block[] = [titleBlock(title)];
-	if (excerpt) blocks.push({ kind: 'paragraph', runs: [{ text: excerpt, marks: [] }] });
-	blocks.push(footerBlock(url));
-	return blocks;
+/**
+ * Title in bold, the opening of the note with its formatting, then a link.
+ * Blocks are added until there is enough to read (a one-line photo caption
+ * is not a summary), and the last one is cut short if it runs long. Lists
+ * stay lists. Code, tables, and rules are left for the page.
+ */
+export function summaryBlocks(content: string, title: string, url: string, context: FormatContext = {}): Block[] {
+	const { body } = splitFrontmatter(content);
+	const source = markdownToBlocks(body, context);
+	const first = source[0];
+	if (first?.kind === 'heading' && sameText(runsToPlain(first.runs), title)) source.shift();
+
+	const picked: Block[] = [];
+	let total = 0;
+	for (const block of source) {
+		if (block.kind === 'code' || block.kind === 'table' || block.kind === 'rule') continue;
+		if (total >= SUMMARY_MIN_CHARS) break;
+		const length = visibleLength(block.runs);
+		const room = SUMMARY_MAX_CHARS - total;
+		if (length > room) {
+			const [head] = splitRuns(block.runs, room - 1, block.kind === 'list' || block.kind === 'quote');
+			if (head.length > 0) picked.push({ kind: block.kind, runs: [...head, { text: '…', marks: [] }] });
+			total = SUMMARY_MAX_CHARS;
+			break;
+		}
+		picked.push(block);
+		total += length;
+	}
+	// A heading with nothing after it says nothing.
+	while (picked[picked.length - 1]?.kind === 'heading') picked.pop();
+	return [titleBlock(title), ...picked, footerBlock(url)];
 }
 
 function titleBlock(title: string): Block {

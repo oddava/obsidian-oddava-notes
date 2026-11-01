@@ -76,14 +76,55 @@ describe('telegram post text', () => {
 	});
 
 	it('posts a summary when the setting or the note asks for one', () => {
-		const content = `# Hello\n\nLearn **this** & that.\n\nSecond paragraph that is not in a summary.\n`;
+		const opening = 'Learn **this** & that. '.repeat(10).trim();
+		const content = `# Hello\n\n${opening}\n\nSecond paragraph that is not in a summary.\n`;
 		const fromSetting = prepare(content, { format: 'summary' });
 		expect(fromSetting.parts[0]?.text.html).toBe(
-			'<b>Hello</b>\n\nLearn this &amp; that.\n\n<a href="https://oddava.me/notes/knowledge">Read on oddava.me</a>',
+			`<b>Hello</b>\n\n${'Learn <b>this</b> &amp; that. '.repeat(10).trim()}\n\n<a href="https://oddava.me/notes/knowledge">Read on oddava.me</a>`,
 		);
 		const fromNote = prepare(`---\ntelegram_format: summary\n---\n${content}`, { format: 'full' });
 		expect(fromNote.format).toBe('summary');
 		expect(fromNote.parts[0]?.text.plain).not.toContain('Second paragraph');
+	});
+
+	it('keeps lists and headings in a summary, and reads past a short caption', () => {
+		const content = [
+			'# July 20, 2026',
+			'',
+			'![[serkis.png]]',
+			'dragon king serkis from [[reading/manhwa/the-greatest-estate-developer|tged]]',
+			'',
+			'## list of things i did today',
+			'',
+			"- redesigned this site's notes page and added a sidebar with minimap to navigate.",
+			"- hitting weekly claude quota faster so i didn't do much to save tokens",
+			'- finally fixed the preprod api 500 errors',
+			'- bought some snacks',
+			'',
+			'```',
+			'code is left for the page',
+			'```',
+		].join('\n');
+		const draft = prepare(content, { format: 'summary' });
+		expect(draft.parts[0]?.text.html).toBe(
+			[
+				'<b>July 20, 2026</b>',
+				'dragon king serkis from tged',
+				'<b>list of things i did today</b>',
+				"• redesigned this site's notes page and added a sidebar with minimap to navigate.\n• hitting weekly claude quota faster so i didn't do much to save tokens\n• finally fixed the preprod api 500 errors\n• bought some snacks",
+				'<a href="https://oddava.me/notes/knowledge">Read on oddava.me</a>',
+			].join('\n\n'),
+		);
+	});
+
+	it('cuts a long summary at a line or a word', () => {
+		const items = Array.from({ length: 40 }, (_, index) => `- item ${index} with a few words in it`).join('\n');
+		const draft = prepare(`# Long list\n\n${items}\n`, { format: 'summary' });
+		const plain = draft.parts[0]?.text.plain ?? '';
+		expect(plain.length).toBeLessThan(700);
+		expect(plain).toContain('• item 0 with a few words in it');
+		expect(plain).not.toContain('item 39');
+		expect(plain).toMatch(/…\n\nRead on oddava\.me$/);
 	});
 
 	it('follows the link preview setting and the per-note override', () => {

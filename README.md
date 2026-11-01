@@ -119,7 +119,7 @@ A note that is outside the sync folder, or not published yet, is refused, becaus
 
 Telegram allows 4096 characters in a message and 1024 in a photo caption. A longer note is split into several messages, between paragraphs where it can, or at a line, sentence, or word when one paragraph is too long. Formatting carries across the cut. Only the first message plays a notification sound.
 
-**Summary and link** posts the title, the first paragraph, and the link. Choose it in settings, or for one note with `telegram_format: summary` (or `full`) in its frontmatter.
+**Summary and link** posts the title, the opening of the note with its formatting (lists stay lists), and the link. It reads past a short opening, such as a photo caption, until it has a few lines, and stops at about 600 characters. Code blocks and tables are left for the page. Choose it in settings, or for one note with `telegram_format: summary` (or `full`) in its frontmatter.
 
 ### Cover photo
 
