@@ -151,6 +151,34 @@ describe('block Markdown', () => {
 		expect(html(markdown)).toBe('Visible  text.\n\n<pre>%% kept inside code %%</pre>');
 	});
 
+	it('keeps list items that wrap onto more lines, also inside callouts', () => {
+		expect(html('- first item\n  wraps here\n- second\n    - nested\n      more')).toBe(
+			'• first item\n\u00a0\u00a0\u00a0\u00a0wraps here\n• second\n\u00a0\u00a0\u00a0\u00a0◦ nested\n\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0more',
+		);
+		expect(html('> [!note] Steps\n> - one\n>   still one\n> - two')).toBe(
+			'<blockquote>📝 <b>Steps</b>\n• one\n\u00a0\u00a0\u00a0\u00a0still one\n• two</blockquote>',
+		);
+	});
+
+	it('keeps text after a one-line formula and a stray $$', () => {
+		expect(html('$$x$$ text\nnext\n\nanother paragraph')).toBe('<code>x</code> text\nnext\n\nanother paragraph');
+		expect(html('$$\n\nplain')).toBe('$$\n\nplain');
+		expect(html('$$\na^2\n$$\n\nafter')).toBe('<pre>a^2</pre>\n\nafter');
+		expect(html('$$ e = mc^2 $$')).toBe('<pre>e = mc^2</pre>');
+	});
+
+	it('keeps a trailing # that is part of the heading', () => {
+		expect(html('## Learning C#')).toBe('<b>Learning C#</b>');
+		expect(html('## Closed ##')).toBe('<b>Closed</b>');
+	});
+
+	it('truncates table cells by whole characters', () => {
+		const cell = '😀'.repeat(30);
+		const rendered = html(`| a |\n|---|\n| ${cell} |`);
+		expect(rendered).toContain(`${'😀'.repeat(23)}…`);
+		expect(rendered).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+	});
+
 	it('keeps single line breaks inside a paragraph', () => {
 		expect(html('line one\nline two')).toBe('line one\nline two');
 	});
@@ -177,15 +205,22 @@ describe('splitting into messages', () => {
 	});
 
 	it('cuts one huge paragraph at a sentence and keeps marks on both sides', () => {
-		const huge = `**${'Bold sentence goes here. '.repeat(400).trim()}**`;
+		const huge = `> ${'A quoted sentence with **bold** goes here. '.repeat(300).trim()}`;
 		const messages = packBlocks(markdownToBlocks(huge), () => TELEGRAM_TEXT_LIMIT);
 		expect(messages.length).toBeGreaterThan(2);
 		for (const runs of messages) {
 			const rendered = renderRuns(runs);
 			expect(rendered.length).toBeLessThanOrEqual(TELEGRAM_TEXT_LIMIT);
-			expect(rendered.html.startsWith('<b>')).toBe(true);
-			expect(rendered.html.endsWith('.</b>')).toBe(true);
+			expect(rendered.html.startsWith('<blockquote>A quoted')).toBe(true);
+			expect(rendered.html.endsWith('here.</blockquote>')).toBe(true);
+			expect(balanced(rendered.html)).toBe(true);
 		}
+	});
+
+	it('stays fast on a paragraph full of markers that never close', () => {
+		const started = Date.now();
+		markdownToBlocks('*a **b [c '.repeat(8000));
+		expect(Date.now() - started).toBeLessThan(3000);
 	});
 
 	it('splits a long code block at line breaks into separate pre blocks', () => {

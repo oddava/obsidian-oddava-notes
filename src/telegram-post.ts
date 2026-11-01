@@ -125,7 +125,7 @@ export async function updatePost(
 	let sent = 0;
 	let deleted = 0;
 	const record = (): TelegramRecord => ({ messageIds: [...ids], hashes: [...hashes], media: existing.media });
-	const parts = draft.parts;
+	const parts = draft.updateParts;
 
 	for (let index = 0; index < Math.min(ids.length, parts.length); index += 1) {
 		const part = parts[index] as TelegramPart;
@@ -178,7 +178,21 @@ export async function updatePost(
 export async function replacePost(env: TelegramPostEnv, draft: TelegramPostDraft): Promise<TelegramPostResult> {
 	const old = draft.existing?.messageIds ?? [];
 	const fresh = await sendNewPost(env, draft);
-	if (!fresh.ok) return fresh;
+	if (!fresh.ok) {
+		// The old post is still the one the note tracks. Take back the part of
+		// the new one that went out, so the channel does not show it twice.
+		const warnings = [...fresh.warnings];
+		const partial = fresh.record?.messageIds ?? [];
+		if (partial.length > 0) {
+			const left = await deleteMessages(env, partial, []);
+			if (left.length > 0) {
+				warnings.push(
+					`The new post stopped part-way. Delete ${left.length === 1 ? `message ${left[0]}` : `messages ${left.join(', ')}`} in Telegram; the note still points to the old post.`,
+				);
+			}
+		}
+		return { ...fresh, record: null, sent: 0, warnings };
+	}
 	const warnings = [...fresh.warnings];
 	const left = await deleteMessages(env, old, warnings);
 	return { ...fresh, deleted: old.length - left.length, warnings };

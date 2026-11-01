@@ -447,7 +447,10 @@ export function classifyTelegramFailure(status: number, body: unknown, token?: s
 	}
 	if (
 		status === 413 ||
-		lower.includes('photo') ||
+		lower.includes('photo_') ||
+		lower.includes('photo_invalid') ||
+		lower.includes('wrong file type') ||
+		lower.includes('type of file mismatch') ||
 		lower.includes('image_process_failed') ||
 		lower.includes('wrong file identifier') ||
 		lower.includes('failed to get http url content') ||

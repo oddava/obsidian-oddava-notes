@@ -289,7 +289,13 @@ describe('updating a post', () => {
 		await updatePost(env(telegram), caption, { allowGrowth: false });
 		expect(telegram.methods()).toEqual(['editMessageCaption']);
 
-		const newImage = prepare(stamped, { cover: { ...cover, mtime: 2 } });
+		// Another device sees another mtime for the same file. That is not a new image.
+		const synced = prepare(stamped, { cover: { ...cover, mtime: 99 } });
+		telegram.calls.length = 0;
+		await updatePost(env(telegram), synced, { allowGrowth: false });
+		expect(telegram.methods()).toEqual([]);
+
+		const newImage = prepare(stamped, { cover: { ...cover, size: 5 } });
 		telegram.calls.length = 0;
 		await updatePost(env(telegram), newImage, { allowGrowth: false });
 		expect(telegram.methods()).toEqual(['editMessageMedia']);
@@ -311,7 +317,44 @@ describe('updating a post', () => {
 	});
 });
 
+describe('after the cover photo was refused', () => {
+	it('updates the text post instead of getting stuck', async () => {
+		const telegram = new FakeTelegram(token);
+		const content = `# Hello\n\n${long}\n`;
+		telegram.fail('sendPhoto', 'Bad Request: IMAGE_PROCESS_FAILED');
+		const draft = prepare(content, { cover });
+		const sent = await sendNewPost(env(telegram), draft);
+		expect(sent.droppedPhoto).toBe(true);
+		const stamped = withTelegramRecord(content, sent.record ?? { messageIds: [], hashes: [] });
+
+		const again = prepare(stamped, { cover });
+		expect(again.change).toEqual({ kind: 'same', changed: [] });
+		expect(again.unchanged).toBe(true);
+
+		const edited = prepare(stamped.replace(long, `${long} Edited.`), { cover });
+		telegram.calls.length = 0;
+		const result = await updatePost(env(telegram), edited, { allowGrowth: false });
+		expect(result.ok).toBe(true);
+		expect(telegram.methods()).toEqual(['editMessageText']);
+	});
+});
+
 describe('replacing a post', () => {
+	it('takes back a half-sent new post and keeps tracking the old one', async () => {
+		const telegram = new FakeTelegram(token);
+		const content = `# Hello\n\n${long}\n`;
+		const draft = prepare(content);
+		const sent = await sendNewPost(env(telegram), draft);
+		const old = sent.record?.messageIds ?? [];
+		const stamped = withTelegramRecord(longNote(30), sent.record ?? { messageIds: [], hashes: [] });
+		const bigger = prepare(stamped);
+		telegram.fail('sendMessage', 'Bad Request: chat not found', { when: () => telegram.channel().length === 2 });
+		const result = await replacePost(env(telegram), bigger);
+		expect(result.ok).toBe(false);
+		expect(result.record).toBeNull();
+		expect(telegram.channel().map((message) => message.id)).toEqual(old);
+	});
+
 	it('sends the new post first, then deletes the old messages', async () => {
 		const telegram = new FakeTelegram(token);
 		const content = `# Hello\n\n${long}\n`;
@@ -319,7 +362,7 @@ describe('replacing a post', () => {
 		const sent = await sendNewPost(env(telegram), draft);
 		const { stamped } = after(content, draft, sent.record?.messageIds ?? []);
 		const withCover = prepare(stamped, { cover });
-		expect(withCover.change.kind).toBe('incompatible');
+		expect(withCover.updateParts[0]?.kind).toBe('text');
 		telegram.calls.length = 0;
 		const result = await replacePost(env(telegram), withCover);
 		expect(result).toMatchObject({ ok: true, deleted: 1 });

@@ -451,6 +451,13 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		});
 	}
 
+	/** Like enqueue, for a job whose result the caller needs. */
+	private enqueueResult<T>(path: string, job: () => Promise<T>): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			this.enqueue(path, () => job().then(resolve, reject));
+		});
+	}
+
 	private async publishFile(
 		file: TFile,
 		source: 'command' | 'autosave' | 'publish-and-post',
@@ -1282,11 +1289,20 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		}
 		const draft = prepared.draft;
 		const canUpdate = draft.existing !== undefined && draft.change.kind !== 'incompatible';
-		new TelegramPostModal(this.app, draft, {
-			sendNew: () => this.runTelegram(file, draft, 'new'),
-			updateExisting: canUpdate ? () => this.runTelegram(file, draft, 'update') : undefined,
-			replaceExisting: draft.existing ? () => this.runTelegram(file, draft, 'replace') : undefined,
-		}, this.coverPreviewSrc(draft.cover)).open();
+		// Queued behind any publish of the same note, so the frontmatter write
+		// and the published fingerprint do not race.
+		const queued = (mode: 'new' | 'update' | 'replace') => () =>
+			this.enqueueResult(file.path, () => this.runTelegram(file, draft, mode));
+		new TelegramPostModal(
+			this.app,
+			draft,
+			{
+				sendNew: queued('new'),
+				updateExisting: canUpdate ? queued('update') : undefined,
+				replaceExisting: draft.existing ? queued('replace') : undefined,
+			},
+			this.coverPreviewSrc(draft.cover),
+		).open();
 	}
 
 	private coverPreviewSrc(cover: TelegramCover | undefined): string | undefined {
@@ -1469,7 +1485,10 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			for (const warning of outcome.warnings) this.notify(warning, 10000);
 			if (!outcome.ok) {
 				this.notify(telegramFailureNotice(draft, mode, outcome), 10000);
-				return false;
+				// Something reached the channel, so this draft is stale: the same
+				// button would send those messages again. Close; reopening reads
+				// the new record from the note.
+				return outcome.record !== null;
 			}
 			this.notify(telegramSuccessNotice(draft, mode, outcome));
 			return true;

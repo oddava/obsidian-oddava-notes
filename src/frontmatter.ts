@@ -4,14 +4,15 @@
  * Body text is what "the same note" means.
  */
 
-const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+// The inner group is optional so an emptied block (`---\n---`) still counts.
+const FRONTMATTER = /^---\r?\n(?:([\s\S]*?)\r?\n)?---\r?\n?/;
 
 export function splitFrontmatter(content: string): { raw: string | null; body: string } {
 	const match = content.match(FRONTMATTER);
-	const raw = match?.[1];
-	if (match === null || raw === undefined) {
+	if (match === null) {
 		return { raw: null, body: content };
 	}
+	const raw = match[1] ?? '';
 	const body = content.slice(match[0].length).replace(/^\r?\n/, '');
 	return { raw, body };
 }
@@ -150,14 +151,14 @@ export function upsertFrontmatter(content: string, updates: Record<string, strin
 	const keys = Object.keys(updates);
 	if (keys.length === 0) return content;
 	const match = content.match(FRONTMATTER);
-	if (match?.[1] === undefined || match.index === undefined) {
+	if (!match || match.index === undefined) {
 		const lines = keys.filter((key) => updates[key] !== null).map((key) => `${key}: ${updates[key]}`);
 		if (lines.length === 0) return content;
 		const body = content.length > 0 ? `\n${content.replace(/^\n/, '')}` : '';
 		return `---\n${lines.join('\n')}\n---\n${body}`;
 	}
 	const newline = match[0].includes('\r\n') ? '\r\n' : '\n';
-	const lines = match[1].split(/\r?\n/);
+	const lines = match[1] === undefined || match[1] === '' ? [] : match[1].split(/\r?\n/);
 	const seen = new Set<string>();
 	const next: string[] = [];
 	for (const line of lines) {
@@ -176,7 +177,8 @@ export function upsertFrontmatter(content: string, updates: Record<string, strin
 		const value = updates[key];
 		if (!seen.has(key) && value !== null && value !== undefined) next.push(`${key}: ${value}`);
 	}
-	const block = `---${newline}${next.join(newline)}${newline}---${newline}`;
+	const inner = next.length > 0 ? `${next.join(newline)}${newline}` : '';
+	const block = `---${newline}${inner}---${newline}`;
 	const after = content.slice(match.index + match[0].length);
 	return content.slice(0, match.index) + block + after;
 }

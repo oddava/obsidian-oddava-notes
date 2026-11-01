@@ -142,7 +142,7 @@ The post's message ids are stored in the note: `telegram_message_id` (the first 
 **Post current note to Telegram** on a note that was already posted offers:
 
 - **Update post.** Edits only the messages that changed. A photo is uploaded again only if the image changed. If the note got shorter, the extra messages are deleted. If it got longer, the new messages are sent as replies to the post, because Telegram adds them at the bottom of the channel.
-- **Replace post.** Sends the post again, in order, then deletes the old messages. Use it when the note grew a lot, or when a cover photo was added or removed: Telegram cannot turn a text message into a photo, or back.
+- **Replace post.** Sends the post again, in order, then deletes the old messages. Use it when the note grew a lot, or to add or remove the cover photo: Telegram cannot turn a text message into a photo, or back, so Update keeps a text post as text. If the new post stops part-way, the messages that went out are deleted again and the note keeps pointing to the old post.
 - **Post new.** Sends a new post and leaves the old one alone.
 
 If Telegram cannot delete an old message (bots can only delete their messages for a limited time), the notice tells you which message to delete by hand. If a message of the post was deleted in Telegram, Update says so; use Replace or Post new.

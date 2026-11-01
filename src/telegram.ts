@@ -117,6 +117,12 @@ export interface TelegramPostDraft {
 	parts: TelegramPart[];
 	/** The same post without the cover photo, for when Telegram refuses the image. */
 	textOnly: TelegramPart[] | null;
+	/**
+	 * What Update edits the existing post into. A post that went out as text
+	 * stays text, even if the note has a cover image now (or Telegram refused
+	 * it): Telegram cannot add a photo to a text message. Replace sends `parts`.
+	 */
+	updateParts: TelegramPart[];
 	cover?: TelegramCover;
 	/** Set when this note already has a channel post. */
 	existing?: TelegramRecord;
@@ -138,7 +144,7 @@ export type TelegramFollowUp =
 	| { kind: 'edit'; unchanged: boolean }
 	| { kind: 'confirm'; notice: string };
 
-const HEADING_PATTERN = /^#{1,6}\s+(.+?)\s*#*\s*$/m;
+const HEADING_PATTERN = /^#{1,6}\s+(.+?)(?:\s+#+)?\s*$/m;
 const TOO_SHORT_NOTICE = 'Not posted to Telegram. The note is still too short.';
 
 /**
@@ -252,7 +258,9 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 		meta.messageIds.length > 0
 			? { messageIds: meta.messageIds, media: meta.media, hashes: meta.hashes }
 			: undefined;
-	const change = compareLayout(existing, parts);
+	const keepText = existing !== undefined && existing.media !== 'photo' && textOnly !== null;
+	const updateParts = keepText ? textOnly : parts;
+	const change = compareLayout(existing, updateParts);
 
 	const warnings: string[] = [...(input.coverWarnings ?? [])];
 	if (plainBody(splitFrontmatter(input.content).body).length < NEARLY_EMPTY_CHARS) {
@@ -276,6 +284,11 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 		} else if (change.kind === 'incompatible') {
 			warnings.push(`${change.reason} Replace the post or send a new one.`);
 		}
+		if (keepText && cover) {
+			warnings.push(
+				`The post on Telegram is text. Update keeps it that way; Replace sends it again with ${cover.label} as the photo.`,
+			);
+		}
 	}
 
 	return {
@@ -289,6 +302,7 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 			linkPreview,
 			parts,
 			textOnly,
+			updateParts,
 			cover,
 			existing,
 			change,
@@ -385,7 +399,9 @@ function textFingerprint(html: string, preview: LinkPreviewOptions): string {
 
 export function coverFingerprint(cover: TelegramCover): string {
 	return contentFingerprint(
-		cover.kind === 'url' ? `url:${cover.url}` : `vault:${cover.path}:${cover.size}:${cover.mtime}`,
+		// Path and size, not mtime: devices that sync the vault see different
+		// mtimes for the same file, and would re-upload the photo for nothing.
+		cover.kind === 'url' ? `url:${cover.url}` : `vault:${cover.path}:${cover.size}`,
 	);
 }
 
@@ -436,7 +452,8 @@ export function withTelegramRecord(content: string, record: TelegramRecord): str
 		telegram_message_id: String(record.messageIds[0]),
 		telegram_message_ids: record.messageIds.length > 1 ? record.messageIds.join(',') : null,
 		telegram_media: record.media === 'photo' ? 'photo' : null,
-		telegram_hash: record.hashes.join(','),
+		// Quoted: a hash such as 12e45678 would otherwise read as a YAML number.
+		telegram_hash: `"${record.hashes.join(',')}"`,
 	});
 }
 

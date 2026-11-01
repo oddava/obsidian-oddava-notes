@@ -218,7 +218,7 @@ describe('telegram follow-up after publish', () => {
 		expect(telegramFollowUp('command', edited, prepare(edited))).toEqual({ kind: 'edit', unchanged: false });
 	});
 
-	it('asks before adding messages or swapping the photo', () => {
+	it('asks before adding messages or dropping the photo, and keeps a text post text', () => {
 		const first = note(long);
 		const same = stamp(first, prepare(first), [9]);
 		const grown = `${same}\n${Array.from({ length: 30 }, () => long.repeat(3)).join('\n\n')}\n`;
@@ -226,7 +226,15 @@ describe('telegram follow-up after publish', () => {
 			kind: 'confirm',
 			notice: expect.stringMatching(/Run Post to Telegram/),
 		});
-		expect(telegramFollowUp('command', same, prepare(same, { cover }))).toEqual({
+		// A text post stays text when a cover appears; Replace adds the photo.
+		const withCover = prepare(same, { cover });
+		expect(telegramFollowUp('command', same, withCover)).toEqual({ kind: 'edit', unchanged: true });
+		expect(withCover.updateParts.map((part) => part.kind)).toEqual(['text']);
+		expect(withCover.parts.map((part) => part.kind)).toEqual(['photo']);
+		expect(withCover.warnings.join(' ')).toMatch(/Replace sends it again with cover.png/);
+
+		const photoPost = stamp(first, prepare(first, { cover }), [9]);
+		expect(telegramFollowUp('command', photoPost, prepare(photoPost))).toEqual({
 			kind: 'confirm',
 			notice: expect.stringMatching(/replace the post/),
 		});
@@ -251,6 +259,12 @@ describe('telegram frontmatter record', () => {
 		expect(single).not.toContain('telegram_message_ids');
 		expect(single).not.toContain('telegram_media');
 		expect(readTelegramFrontmatter(single)).toMatchObject({ messageId: 50, messageIds: [50], hashes: ['cc'] });
+	});
+
+	it('fills an emptied frontmatter block instead of adding a second one', () => {
+		const stamped = withTelegramRecord('---\n---\n# Hi\n', { messageIds: [5], hashes: ['12e45678'] });
+		expect(stamped).toBe('---\ntelegram_message_id: 5\ntelegram_hash: "12e45678"\n---\n# Hi\n');
+		expect(readTelegramFrontmatter(stamped).hashes).toEqual(['12e45678']);
 	});
 
 	it('reads notes from before multi-message posts', () => {

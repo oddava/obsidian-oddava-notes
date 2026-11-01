@@ -162,8 +162,8 @@ function parseLines(lines: string[], context: FormatContext, insideQuote: boolea
 			continue;
 		}
 
-		// Display math.
-		if (trimmed.startsWith('$$')) {
+		// Display math: `$$…$$` on one line, or `$$` lines around a block.
+		if (trimmed.startsWith('$$') && isDisplayMath(lines, i)) {
 			flushParagraph();
 			const rest = trimmed.slice(2);
 			const math: string[] = [];
@@ -195,7 +195,7 @@ function parseLines(lines: string[], context: FormatContext, insideQuote: boolea
 		}
 
 		// Heading.
-		const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
+		const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/);
 		if (heading) {
 			flushParagraph();
 			const runs = trimRuns(addMark(parseInline(heading[2] ?? '', context), { type: 'b' }));
@@ -289,13 +289,28 @@ function parseLines(lines: string[], context: FormatContext, insideQuote: boolea
 	return blocks;
 }
 
+function isDisplayMath(lines: string[], start: number): boolean {
+	const first = (lines[start] ?? '').trim();
+	if (first.length >= 4 && first.endsWith('$$')) return true;
+	if (first !== '$$' && first.slice(2).includes('$$')) return false;
+	for (let index = start + 1; index < lines.length; index += 1) {
+		const line = (lines[index] ?? '').trim();
+		if (!line) return false;
+		if (line.endsWith('$$')) return true;
+	}
+	return false;
+}
+
 const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+
+/** One item with its continuation lines (`\n` inside the item). */
+const LIST_ITEM_WITH_BODY = /^(\s*)([-*+]|\d{1,9}[.)])\s+([\s\S]*)$/;
 
 function listBlock(items: string[], context: FormatContext): Block | null {
 	const runs: Run[] = [];
 	const indents: number[] = [];
 	for (const item of items) {
-		const match = item.match(LIST_ITEM);
+		const match = item.match(LIST_ITEM_WITH_BODY);
 		if (!match) continue;
 		const width = (match[1] ?? '').replace(/\t/g, '    ').length;
 		while (indents.length > 0 && (indents[indents.length - 1] ?? 0) > width) indents.pop();
@@ -316,7 +331,11 @@ function listBlock(items: string[], context: FormatContext): Block | null {
 		}
 		if (runs.length > 0) runs.push({ text: '\n', marks: [] });
 		runs.push({ text: INDENT.repeat(depth) + prefix, marks: [] });
-		runs.push(...trimRuns(parseInline(body, context)));
+		// Continuation lines sit under the item's text, not under the bullet.
+		const hanging = `\n${INDENT.repeat(depth + 1)}`;
+		for (const run of trimRuns(parseInline(body, context))) {
+			runs.push({ text: run.text.replace(/\n/g, hanging), marks: run.marks });
+		}
 	}
 	const merged = mergeRuns(runs);
 	return merged.length > 0 ? { kind: 'list', runs: merged } : null;
@@ -367,15 +386,20 @@ function tableBlock(rows: string[], context: FormatContext, insideQuote: boolean
 		splitTableRow(row).map((cell) => runsToPlain(parseInline(cell, context)).replace(/\s+/g, ' ').trim()),
 	);
 	const columns = Math.max(...cells.map((row) => row.length));
+	// Count code points, so an emoji is one column and is never cut in half.
+	const width = (value: string): number => Array.from(value).length;
 	const widths: number[] = [];
 	for (let column = 0; column < columns; column += 1) {
-		widths.push(Math.min(24, Math.max(1, ...cells.map((row) => (row[column] ?? '').length))));
+		widths.push(Math.min(24, Math.max(1, ...cells.map((row) => width(row[column] ?? '')))));
 	}
 	const lines = cells.map((row) =>
 		widths
-			.map((width, column) => {
+			.map((size, column) => {
 				const value = row[column] ?? '';
-				return value.length > width ? `${value.slice(0, width - 1)}…` : value.padEnd(width);
+				const points = Array.from(value);
+				return points.length > size
+					? `${points.slice(0, size - 1).join('')}…`
+					: value + ' '.repeat(size - points.length);
 			})
 			.join(' │ ')
 			.trimEnd(),
@@ -606,6 +630,16 @@ export function parseInline(text: string, context: FormatContext = {}, marks: Ma
 			continue;
 		}
 
+		if (rest.startsWith('$$')) {
+			const close = text.indexOf('$$', i + 2);
+			const inner = close > i ? text.slice(i + 2, close) : '';
+			if (inner.trim() && !inner.includes('\n')) {
+				push([{ text: inner.trim(), marks: [...marks, { type: 'code' }] }]);
+				i = close + 2;
+				continue;
+			}
+		}
+
 		if (char === '$' && !/\d/.test(text.charAt(i + 1))) {
 			const close = findInlineMath(text, i);
 			if (close > i) {
@@ -667,11 +701,19 @@ function matchDelimiter(
 	return null;
 }
 
+/**
+ * Emphasis and link searches stop after this many characters. Real emphasis
+ * is far shorter, and the cap keeps a paragraph full of stray `*` linear
+ * instead of quadratic on the UI thread.
+ */
+const SEARCH_LIMIT = 3000;
+
 function findCloser(text: string, from: number, delimiter: string): number {
 	const single = delimiter.length === 1;
 	const char = delimiter.charAt(0);
 	let i = from;
-	while (i < text.length) {
+	const end = Math.min(text.length, from + SEARCH_LIMIT);
+	while (i < end) {
 		const current = text.charAt(i);
 		if (current === '\\') {
 			i += 2;
@@ -732,7 +774,8 @@ function matchLink(text: string, start: number): { label: string; href: string; 
 	if (text.charAt(start) !== '[') return null;
 	let depth = 0;
 	let labelEnd = -1;
-	for (let i = start; i < text.length; i += 1) {
+	const labelLimit = Math.min(text.length, start + SEARCH_LIMIT);
+	for (let i = start; i < labelLimit; i += 1) {
 		const char = text.charAt(i);
 		if (char === '\\') {
 			i += 1;
@@ -751,7 +794,8 @@ function matchLink(text: string, start: number): { label: string; href: string; 
 	if (labelEnd < 0 || text.charAt(labelEnd + 1) !== '(') return null;
 	let parens = 0;
 	let hrefEnd = -1;
-	for (let i = labelEnd + 1; i < text.length; i += 1) {
+	const hrefLimit = Math.min(text.length, labelEnd + 1 + SEARCH_LIMIT);
+	for (let i = labelEnd + 1; i < hrefLimit; i += 1) {
 		const char = text.charAt(i);
 		if (char === '\\') {
 			i += 1;
