@@ -1,4 +1,4 @@
-import { MarkdownView, Menu, Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { MarkdownView, Menu, normalizePath, Notice, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
 import { NotesClient } from './api';
 import {
 	canAutoPull,
@@ -43,16 +43,28 @@ import {
 import { SiteDeleteModal } from './site-delete-modal';
 import { TelegramPostModal } from './telegram-modal';
 import {
-	editTelegramMessage,
+	coverCandidates,
+	describeParts,
+	isPhotoPath,
+	MAX_PHOTO_BYTES,
+	photoMimeType,
 	prepareTelegramPost,
-	sendTelegramMessage,
+	publicNoteUrl,
 	telegramFollowUp,
-	telegramHtml,
-	telegramTokenProblem,
-	TelegramPostDeleted,
-	withTelegramMessageId,
+	withTelegramRecord,
+	type TelegramCover,
 	type TelegramPostDraft,
+	type TelegramPrepareResult,
+	type TelegramRecord,
 } from './telegram';
+import {
+	createTelegramApi,
+	normalizeTelegramChannel,
+	TelegramApiError,
+	telegramTokenProblem,
+	type TelegramPhotoInput,
+} from './telegram-api';
+import { replacePost, sendNewPost, updatePost, type TelegramPostEnv, type TelegramPostResult } from './telegram-post';
 import { contentFingerprint } from './fingerprint';
 import { preserveTelegramFrontmatter, readTelegramFrontmatter } from './frontmatter';
 import {
@@ -1263,68 +1275,158 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			this.notify(tokenProblem, 8000);
 			return;
 		}
-		const prepared = prepareTelegramPost({
+		const prepared = this.buildTelegramDraft(file, content, true);
+		if (!prepared.ok) {
+			this.notify(prepared.reason, 8000);
+			return;
+		}
+		const draft = prepared.draft;
+		const canUpdate = draft.existing !== undefined && draft.change.kind !== 'incompatible';
+		new TelegramPostModal(this.app, draft, {
+			sendNew: () => this.runTelegram(file, draft, 'new'),
+			updateExisting: canUpdate ? () => this.runTelegram(file, draft, 'update') : undefined,
+			replaceExisting: draft.existing ? () => this.runTelegram(file, draft, 'replace') : undefined,
+		}, this.coverPreviewSrc(draft.cover)).open();
+	}
+
+	private coverPreviewSrc(cover: TelegramCover | undefined): string | undefined {
+		if (!cover) return undefined;
+		if (cover.kind === 'url') return cover.url;
+		const file = this.app.vault.getAbstractFileByPath(cover.path);
+		return file instanceof TFile ? this.app.vault.getResourcePath(file) : undefined;
+	}
+
+	/**
+	 * Manual Publish only. A flagged note with real text and no message id is
+	 * posted. A note that was already posted is edited when the text changed.
+	 * An edit that would add messages or swap the photo waits for the dialog.
+	 * Publish on save does not call this.
+	 */
+	private async afterManualPublish(file: TFile, content: string): Promise<void> {
+		const meta = readTelegramFrontmatter(content);
+		if (!meta.enabled && meta.messageIds.length === 0) return;
+		const prepared = this.buildTelegramDraft(file, content, false);
+		if (!prepared.ok) {
+			this.notify(`Not posted to Telegram. ${prepared.reason}`, 8000);
+			return;
+		}
+		const draft = prepared.draft;
+		const followUp = telegramFollowUp('command', content, draft);
+		if (followUp.kind === 'skip') return;
+		if (followUp.kind === 'too-short' || followUp.kind === 'confirm') {
+			this.notify(followUp.notice, followUp.kind === 'confirm' ? 10000 : 6000);
+			return;
+		}
+		if (followUp.kind === 'post') {
+			await this.runTelegram(file, draft, 'new');
+			return;
+		}
+		if (followUp.unchanged) return;
+		await this.runTelegram(file, draft, 'update', { allowGrowth: false });
+	}
+
+	private buildTelegramDraft(file: TFile, content: string, compareWithSite: boolean): TelegramPrepareResult {
+		// Do not substitute a placeholder revision. prepareTelegramPost treats any
+		// non-empty string as already published.
+		const cover = this.resolveTelegramCover(file, content);
+		return prepareTelegramPost({
 			vaultPath: file.path,
 			syncFolder: this.settings.syncFolder,
 			content,
 			baseUrl: this.settings.baseUrl,
 			channel: this.settings.telegramChannel,
 			publishedRevision: this.publishedRevision(file.path),
-			fingerprint: this.publishedFingerprint(file.path),
+			fingerprint: compareWithSite ? this.publishedFingerprint(file.path) : undefined,
+			format: this.settings.telegramFormat,
+			linkPreview: this.settings.telegramLinkPreview,
+			cover: cover.cover,
+			coverWarnings: cover.warnings,
+			resolveNote: (target) => this.publicUrlForLink(target, file.path),
 		});
-		if (!prepared.ok) {
-			this.notify(prepared.reason, 8000);
-			return;
-		}
-		const draft = prepared.draft;
-		new TelegramPostModal(this.app, draft, {
-			sendNew: () => this.sendNewTelegramPost(file, draft),
-			updateExisting: draft.messageId ? () => this.updateTelegramPost(file, draft) : undefined,
-		}).open();
 	}
 
-	/**
-	 * Manual Publish only. A flagged note with real text and no message id is
-	 * posted. A note that was already posted is edited when the text changed.
-	 * Publish on save does not call this.
-	 */
-	private async afterManualPublish(file: TFile, content: string): Promise<void> {
-		const rendered = this.renderTelegram(file.path, content);
-		if (!rendered) {
-			const meta = readTelegramFrontmatter(content);
-			if (meta.enabled || meta.messageId) {
-				this.notify('Could not build the Telegram post. Check the channel and the site URL.', 8000);
+	/** The first usable image, from `telegram_image`, `cover`, or the note body. */
+	private resolveTelegramCover(
+		file: TFile,
+		content: string,
+	): { cover: TelegramCover | null; warnings: string[] } {
+		const warnings: string[] = [];
+		const found = coverCandidates(content);
+		if (found.disabled) return { cover: null, warnings };
+		const refs = this.settings.telegramCoverImage ? found.candidates : found.explicit ? [found.explicit] : [];
+		for (const ref of refs) {
+			const explicit = ref === found.explicit;
+			if (/^https?:\/\//i.test(ref)) {
+				const extension = ref.split(/[?#]/)[0]?.match(/\.([a-z0-9]{2,5})$/i)?.[1];
+				if (extension && !isPhotoPath(`x.${extension}`)) {
+					if (explicit) warnings.push(`The cover image ${ref} is not a JPG, PNG, or WebP file, so it is not sent.`);
+					continue;
+				}
+				return { cover: { kind: 'url', url: ref, label: ref }, warnings };
 			}
-			return;
+			const target = this.linkTarget(ref, file.path);
+			if (!target) {
+				if (explicit) warnings.push(`Could not find the cover image ${ref} in the vault.`);
+				continue;
+			}
+			if (!isPhotoPath(target.path)) {
+				if (explicit) warnings.push(`${target.name} cannot be sent as a photo. Use a JPG, PNG, or WebP image.`);
+				continue;
+			}
+			if (target.stat.size > MAX_PHOTO_BYTES) {
+				warnings.push(`${target.name} is larger than Telegram’s 10 MB photo limit, so it is not sent.`);
+				continue;
+			}
+			return {
+				cover: {
+					kind: 'vault',
+					path: target.path,
+					label: target.name,
+					size: target.stat.size,
+					mtime: target.stat.mtime,
+				},
+				warnings,
+			};
 		}
-		const followUp = telegramFollowUp('command', content, rendered.plain);
-		if (followUp.kind === 'skip') return;
-		if (followUp.kind === 'too-short') {
-			this.notify(followUp.notice, 6000);
-			return;
-		}
-		if (followUp.kind === 'post') {
-			await this.sendNewTelegramPost(file, rendered);
-			return;
-		}
-		if (followUp.unchanged) return;
-		await this.updateTelegramPost(file, { ...rendered, messageId: followUp.messageId });
+		return { cover: null, warnings };
 	}
 
-	private renderTelegram(vaultPath: string, content: string): TelegramPostDraft | null {
-		// Do not substitute a placeholder revision. prepareTelegramPost treats any
-		// non-empty string as already published.
-		const publishedRevision = this.publishedRevision(vaultPath);
-		if (!publishedRevision) return null;
-		const prepared = prepareTelegramPost({
-			vaultPath,
-			syncFolder: this.settings.syncFolder,
-			content,
-			baseUrl: this.settings.baseUrl,
-			channel: this.settings.telegramChannel,
-			publishedRevision,
-		});
-		return prepared.ok ? prepared.draft : null;
+	/** Public page for a link to another note, when that note is published. */
+	private publicUrlForLink(target: string, sourcePath: string): string | null {
+		const file = this.linkTarget(target, sourcePath);
+		if (!file || file.extension !== 'md') return null;
+		const mapped = toApiPath(this.settings.syncFolder, file.path);
+		if (!mapped.ok || !this.settings.synced[mapped.apiPath]) return null;
+		return publicNoteUrl(this.settings.baseUrl, mapped.apiPath);
+	}
+
+	/** Resolve a wikilink target or a relative Markdown path to a vault file. */
+	private linkTarget(ref: string, sourcePath: string): TFile | null {
+		const linkpath = (ref.split('|')[0] ?? '').split('#')[0]?.trim() ?? '';
+		if (!linkpath) return null;
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath);
+		if (resolved instanceof TFile) return resolved;
+		const folder = sourcePath.includes('/') ? sourcePath.slice(0, sourcePath.lastIndexOf('/')) : '';
+		const candidates = [joinVaultPath(folder, linkpath), linkpath.replace(/^\/+/, '')];
+		for (const candidate of candidates) {
+			if (!candidate) continue;
+			const direct = this.app.vault.getAbstractFileByPath(normalizePath(candidate));
+			if (direct instanceof TFile) return direct;
+			const withExtension = this.app.vault.getAbstractFileByPath(normalizePath(`${candidate}.md`));
+			if (withExtension instanceof TFile) return withExtension;
+		}
+		return null;
+	}
+
+	private async loadTelegramPhoto(cover: TelegramCover): Promise<TelegramPhotoInput> {
+		if (cover.kind === 'url') return { kind: 'url', url: cover.url };
+		const file = this.app.vault.getAbstractFileByPath(cover.path);
+		if (!(file instanceof TFile)) throw new Error(`${cover.label} is no longer in the vault.`);
+		const data = await this.app.vault.readBinary(file);
+		if (data.byteLength > MAX_PHOTO_BYTES) {
+			throw new TelegramApiError(`${file.name} is larger than Telegram’s 10 MB photo limit.`, 'photo');
+		}
+		return { kind: 'upload', data, fileName: file.name, mimeType: photoMimeType(file.name) };
 	}
 
 	private publishedRevision(vaultPath: string): string | undefined {
@@ -1339,49 +1441,37 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		return this.settings.synced[mapped.apiPath]?.fingerprint;
 	}
 
-	private async sendNewTelegramPost(file: TFile, draft: TelegramPostDraft): Promise<boolean> {
-		return this.withTelegramSend(draft.apiPath, async () => {
-			const sent = await sendTelegramMessage(this.http, {
-				token: this.settings.telegramBotToken,
-				chatId: this.settings.telegramChannel,
-				html: draft.html,
-			});
-			await this.recordTelegramMessage(file, draft.apiPath, sent.messageId, draft.plain);
-			this.notify(`Posted to ${this.settings.telegramChannel}.`);
-			return true;
-		});
-	}
-
-	private async updateTelegramPost(file: TFile, draft: TelegramPostDraft): Promise<boolean> {
-		const messageId = draft.messageId;
-		if (!messageId) return false;
-		if (draft.unchanged) {
+	/** Send, update, or replace a post. True when the dialog can close. */
+	private async runTelegram(
+		file: TFile,
+		draft: TelegramPostDraft,
+		mode: 'new' | 'update' | 'replace',
+		options: { allowGrowth?: boolean } = {},
+	): Promise<boolean> {
+		if (mode === 'update' && draft.unchanged) {
 			this.notify('The Telegram post already matches this note.');
 			return true;
 		}
 		return this.withTelegramSend(draft.apiPath, async () => {
-			const html = draft.html || telegramHtml(draft.title, draft.excerpt, draft.url);
-			let unchanged = false;
-			try {
-				unchanged = (await editTelegramMessage(this.http, {
-					token: this.settings.telegramBotToken,
-					chatId: this.settings.telegramChannel,
-					messageId,
-					html,
-				})) === 'unchanged';
-			} catch (error) {
-				if (error instanceof TelegramPostDeleted) {
-					this.notify(error.message, 10000);
-					return false;
-				}
-				throw error;
+			const env: TelegramPostEnv = {
+				api: createTelegramApi(this.http, this.settings.telegramBotToken),
+				chatId: draft.channel,
+				silent: this.settings.telegramSilent,
+				loadPhoto: (cover) => this.loadTelegramPhoto(cover),
+			};
+			const outcome =
+				mode === 'new'
+					? await sendNewPost(env, draft)
+					: mode === 'update'
+						? await updatePost(env, draft, { allowGrowth: options.allowGrowth ?? true })
+						: await replacePost(env, draft);
+			if (outcome.record) await this.recordTelegramPost(file, draft.apiPath, outcome.record);
+			for (const warning of outcome.warnings) this.notify(warning, 10000);
+			if (!outcome.ok) {
+				this.notify(telegramFailureNotice(draft, mode, outcome), 10000);
+				return false;
 			}
-			await this.recordTelegramMessage(file, draft.apiPath, messageId, draft.plain);
-			this.notify(
-				unchanged
-					? 'The Telegram post already matches this note.'
-					: `Updated the post on ${this.settings.telegramChannel}.`,
-			);
+			this.notify(telegramSuccessNotice(draft, mode, outcome));
 			return true;
 		});
 	}
@@ -1408,22 +1498,63 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 		}
 	}
 
-	private async recordTelegramMessage(
-		file: TFile,
-		apiPath: string,
-		messageId: number,
-		plain: string,
-	): Promise<void> {
+	private async recordTelegramPost(file: TFile, apiPath: string, record: TelegramRecord): Promise<void> {
 		const current = await this.readNote(file, 'command');
-		const next = withTelegramMessageId(current, messageId, plain);
+		const next = withTelegramRecord(current, record);
+		if (next === current) return;
 		await this.writeVaultFile(file.path, next);
 		const synced = this.settings.synced[apiPath];
 		if (!synced) return;
-		this.settings.synced[apiPath] = {
-			revision: synced.revision,
-			fingerprint: contentFingerprint(next),
-		};
-		await this.saveSettings();
+		// Only frontmatter the site drops changed. Keep the note looking published.
+		if (synced.fingerprint === contentFingerprint(current)) {
+			this.settings.synced[apiPath] = {
+				revision: synced.revision,
+				fingerprint: contentFingerprint(next),
+			};
+			await this.saveSettings();
+		}
+	}
+
+	/**
+	 * Settings button. Checks the token, the channel, and the bot's rights
+	 * there, without posting anything.
+	 */
+	async testTelegram(): Promise<void> {
+		const tokenProblem = telegramTokenProblem(this.settings.telegramBotToken);
+		if (tokenProblem) {
+			this.notify(tokenProblem, 8000);
+			return;
+		}
+		const channel = normalizeTelegramChannel(this.settings.telegramChannel);
+		if (!channel) {
+			this.notify('Set a Telegram channel, like @justoddava.', 8000);
+			return;
+		}
+		const api = createTelegramApi(this.http, this.settings.telegramBotToken);
+		try {
+			const me = await api.getMe();
+			const bot = me.username ? `@${me.username}` : (me.first_name ?? 'The bot');
+			const chat = await api.getChat(channel);
+			const name = chat.title ?? chat.username ?? channel;
+			const member = await api.getChatMember(channel, me.id);
+			const problems: string[] = [];
+			if (member.status !== 'administrator' && member.status !== 'creator') {
+				problems.push(`${bot} is not an admin of ${name}. Add it as an admin.`);
+			} else if (chat.type === 'channel') {
+				if (!member.can_post_messages) problems.push('It cannot post messages.');
+				if (!member.can_edit_messages) problems.push('It cannot edit messages, so updates will fail.');
+				if (!member.can_delete_messages) {
+					problems.push('It cannot delete messages, so shortened or replaced posts leave old messages behind.');
+				}
+			}
+			if (problems.length > 0) {
+				this.notify(`Telegram: ${problems.join(' ')}`, 12000);
+				return;
+			}
+			this.notify(`Telegram is ready. ${bot} can post to ${name}.`, 8000);
+		} catch (error) {
+			this.notify(error instanceof Error ? error.message : 'Could not reach Telegram.', 10000);
+		}
 	}
 
 	private async withLocalTelegramFields(vaultPath: string, incoming: string): Promise<string> {
@@ -1436,4 +1567,50 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			return incoming;
 		}
 	}
+}
+
+function joinVaultPath(folder: string, relative: string): string {
+	const parts = folder ? folder.split('/') : [];
+	for (const segment of relative.split('/')) {
+		if (!segment || segment === '.') continue;
+		if (segment === '..') parts.pop();
+		else parts.push(segment);
+	}
+	return parts.join('/');
+}
+
+function telegramSuccessNotice(
+	draft: TelegramPostDraft,
+	mode: 'new' | 'update' | 'replace',
+	outcome: TelegramPostResult,
+): string {
+	const parts = outcome.droppedPhoto && draft.textOnly ? draft.textOnly : draft.parts;
+	if (mode === 'update') {
+		if (outcome.unchanged) return 'The Telegram post already matches this note.';
+		const details: string[] = [];
+		if (outcome.sent > 0) details.push(`added ${outcome.sent === 1 ? 'a message' : `${outcome.sent} messages`}`);
+		if (outcome.deleted > 0) details.push(`removed ${outcome.deleted === 1 ? 'a message' : `${outcome.deleted} messages`}`);
+		return `Updated the post on ${draft.channel}${details.length > 0 ? ` (${details.join(', ')})` : ''}.`;
+	}
+	const verb = mode === 'replace' ? 'Replaced the post on' : 'Posted to';
+	return `${verb} ${draft.channel} as ${describeParts(parts)}.`;
+}
+
+function telegramFailureNotice(
+	draft: TelegramPostDraft,
+	mode: 'new' | 'update' | 'replace',
+	outcome: TelegramPostResult,
+): string {
+	const reason = outcome.error?.message || 'Could not reach Telegram.';
+	if (outcome.error instanceof TelegramApiError && outcome.error.kind === 'deleted' && mode === 'update') {
+		return 'A message of that Telegram post was deleted. Run Post to Telegram and choose Replace or Post new.';
+	}
+	if (mode !== 'update' && outcome.sent > 0) {
+		const total = (outcome.droppedPhoto && draft.textOnly ? draft.textOnly : draft.parts).length;
+		return `Posted ${outcome.sent} of ${total} messages to ${draft.channel}. ${reason} Run Post to Telegram and choose Update to send the rest.`;
+	}
+	if (mode === 'update' && (outcome.edited > 0 || outcome.sent > 0)) {
+		return `The post on ${draft.channel} is only partly updated. ${reason} Run Post to Telegram again to finish.`;
+	}
+	return reason;
 }

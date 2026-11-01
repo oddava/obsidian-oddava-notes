@@ -1,4 +1,11 @@
-import { DEFAULT_TELEGRAM_CHANNEL, normalizeTelegramChannel } from './telegram';
+import {
+	DEFAULT_TELEGRAM_CHANNEL,
+	normalizeTelegramChannel,
+	telegramFormat,
+	telegramLinkPreview,
+	type TelegramFormat,
+	type TelegramLinkPreview,
+} from './telegram';
 import { siteDeleteSetting, type SiteDeleteSetting } from './vault-sync';
 
 /** Floor so a pull cannot loop inside the site's 120 requests/minute limit. */
@@ -38,6 +45,14 @@ export interface OddavaSettings {
 	telegramBotToken: string;
 	/** Channel username or numeric id. Posts remember their id in the note. */
 	telegramChannel: string;
+	/** Whole note, or a summary with a link. `telegram_format` in a note wins. */
+	telegramFormat: TelegramFormat;
+	/** The page's link preview card. `telegram_preview` in a note wins. */
+	telegramLinkPreview: TelegramLinkPreview;
+	/** Send the note's first image as a photo with the post as its caption. */
+	telegramCoverImage: boolean;
+	/** Post without a notification sound. */
+	telegramSilent: boolean;
 	/**
 	 * What to do on the site when a synced note leaves the vault.
 	 * Deletes on the site are soft: the note goes to the trash and can be restored.
@@ -57,6 +72,10 @@ export function defaultSettings(): OddavaSettings {
 		conflictRevisions: {},
 		telegramBotToken: '',
 		telegramChannel: DEFAULT_TELEGRAM_CHANNEL,
+		telegramFormat: 'full',
+		telegramLinkPreview: 'large-below',
+		telegramCoverImage: true,
+		telegramSilent: false,
 		siteDelete: 'ask',
 	};
 }
@@ -83,6 +102,11 @@ export function mergeSettings(stored: unknown): OddavaSettings {
 		telegramChannel:
 			normalizeTelegramChannel(typeof stored.telegramChannel === 'string' ? stored.telegramChannel : '') ??
 			defaults.telegramChannel,
+		telegramFormat: telegramFormat(stored.telegramFormat) ?? defaults.telegramFormat,
+		telegramLinkPreview: telegramLinkPreview(stored.telegramLinkPreview) ?? defaults.telegramLinkPreview,
+		telegramCoverImage:
+			typeof stored.telegramCoverImage === 'boolean' ? stored.telegramCoverImage : defaults.telegramCoverImage,
+		telegramSilent: stored.telegramSilent === true,
 		siteDelete: siteDeleteSetting(stored.siteDelete),
 	};
 }

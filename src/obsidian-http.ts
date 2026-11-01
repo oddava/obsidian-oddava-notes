@@ -12,7 +12,7 @@ export function createObsidianHttp(): HttpClient {
 				url: request.url,
 				method: request.method,
 				headers: request.headers,
-				body: request.body,
+				body: request.bodyBytes ?? request.body,
 				throw: false,
 			});
 			return toHttpResponse(response.status, response.headers, response.text);

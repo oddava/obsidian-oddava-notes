@@ -59,7 +59,7 @@ You can pin **Publish current note**, **Pull notes from site**, and **Post curre
 - **Pull notes from site.** Notes that are missing locally are downloaded. Notes the site has changed, and you have not, are updated. If both sides changed, neither side is overwritten.
 - **Pull automatically.** On by default. A few seconds after the workspace is ready, then every 5 minutes, the plugin pulls while Obsidian is open. It uses the same rules as **Pull notes from site**, including conflict copies, so unpublished local edits are not overwritten. Nothing is announced when the vault is already current. A short notice appears when notes were downloaded or a conflict file was saved. If a pull fails (the phone is offline, for example), that error is shown once and then stays quiet until a later pull succeeds.
 - **Publish on save.** Optional. Off until you turn it on. After Obsidian saves a note in the sync folder, the plugin waits 1.5 seconds and publishes it. It never posts to Telegram.
-- **Post current note to Telegram.** Manual. Posts a note that is already on the site: bold title, a short excerpt, and the public link (`https://oddava.me/notes/diary/hello` for `diary/hello.md`). A confirmation shows the exact text. Cancel sends nothing.
+- **Post current note to Telegram.** Manual. Posts a note that is already on the site to your channel: the whole note with its formatting, the cover image as a photo, and a link to the page with Telegram's link preview card. A dialog shows every message the way Telegram will format it. Cancel sends nothing. It is also in the file and editor menus as **Post to Telegram**.
 - **Publish and post to Telegram.** Publishes the open note, then opens that same confirmation.
 - **Test connection.** The settings tab lists how many notes the site currently has.
 
@@ -76,7 +76,12 @@ Removing a note in the vault does not delete it on the site until you say so. Se
 | Pull automatically | on | Repeating pull while Obsidian is open. |
 | Auto-pull interval | 5 minutes | At least 1 minute between pulls. |
 | Telegram bot token | empty | From @BotFather. Masked. The bot must be a channel admin. |
-| Telegram channel | `@justoddava` | Where posts go. A `@channel` or a numeric id. |
+| Telegram channel | `@justoddava` | Where posts go. A `@channel`, a `t.me` link, or a numeric id. |
+| Telegram post | Full note | **Full note** or **Summary and link**. |
+| Link preview | Large card below the text | The page's preview card: large or small, above or below the text, or off. |
+| Cover photo | on | Send the note's first image as a photo, with the post as its caption. |
+| Post silently | off | Post without a notification sound. |
+| Test Telegram | | Checks the token, the channel, and the bot's admin rights. Posts nothing. |
 | When a note is deleted | Ask | Delete on the site, keep it, or ask. Site deletes go to the trash. |
 
 `oddava.me/diary/hello.md` in the vault is `diary/hello.md` on the site. Every folder and file name under the sync folder has to be lowercase kebab-case (`reading/atomic-habits.md`, `diary/06-10-2026.md`). Spaces, capitals, and underscores are rejected before a request is sent. That is the same rule the API uses.
@@ -88,17 +93,72 @@ The notes API token and the Telegram bot token are stored in the plugin’s `dat
 Posting is manual. Publishing a blank page first, then filling it in, must not announce the blank page.
 
 1. In Telegram, open **@BotFather** and send `/newbot`. Copy the token it gives you.
-2. Add that bot as an admin of the channel (the default is `@justoddava`) and allow it to post messages.
-3. Paste the token into **Telegram bot token**. Change **Telegram channel** only if you are not posting to `@justoddava`.
-4. Publish the note, then run **Post current note to Telegram**. Or run **Publish and post to Telegram**, which publishes and then asks you to confirm the post.
+2. Add that bot as an admin of the channel (the default is `@justoddava`). Allow it to post, edit, and delete messages.
+3. Paste the token into **Telegram bot token**. Change **Telegram channel** only if you are not posting to `@justoddava`. Press **Test Telegram** to check the token, the channel, and the bot's rights.
+4. Publish the note, then run **Post current note to Telegram**. Or run **Publish and post to Telegram**, which publishes and then opens the same dialog.
 
-The message is the title in bold, a short plain-text excerpt, and the public URL. `diary/hello.md` is `https://oddava.me/notes/diary/hello`, the same path the site uses. A note that is outside the sync folder, or not published yet, is refused. A nearly empty note warns you and waits for Cancel or Send.
+A note that is outside the sync folder, or not published yet, is refused, because the post links to the public page. `diary/hello.md` is `https://oddava.me/notes/diary/hello`, the same path the site uses. A nearly empty note warns you and waits for Cancel or Send.
 
-The channel message id is stored in the note as `telegram_message_id`. The site drops that key (it only keeps title, icon, order, and updated), so a pull copies it back onto the site text. The note body is what revisions compare, so the id does not look like a different essay. Other devices that share the vault see the same id.
+### What the post looks like
 
-`telegram: true` in the frontmatter opts that note in. A manual **Publish current note** (the command or the ribbon) then posts it after a successful publish, if the note has at least 40 characters of text once frontmatter and Markdown are stripped, and no message id yet. That first post does not show the confirmation preview. Skipping the preview is on purpose: the flag plus the publish is the request, and the preview stays on **Post current note to Telegram** and **Publish and post to Telegram**. A shorter note is skipped with a short notice. **Publish on save** never posts and never edits the channel, because it runs while you are still typing.
+**Full note** (the default) posts the title in bold, the whole note, and a **Read on oddava.me** link at the end. Markdown becomes Telegram formatting:
 
-Publishing a note that already has `telegram_message_id` updates that channel post when the text changed. If Telegram says the text is unchanged, that counts as success. If the channel post was deleted, the plugin tells you and leaves the id in place so you can send a new one on purpose. **Post current note to Telegram** on a note that was already posted offers **Update existing** and **Post new**.
+| In the note | On Telegram |
+| --- | --- |
+| `**bold**`, `*italic*`, `~~strike~~`, `==highlight==` | bold, italic, strikethrough, bold |
+| `` `code` `` and fenced code blocks | monospace, with the language kept for syntax highlighting |
+| `# Headings` | bold lines |
+| `- lists`, `1. lists`, `- [ ] tasks` | `•` and `◦` bullets, numbers, `☐` and `☑` |
+| `> quotes` | a quote |
+| `> [!tip] Callouts` | a quote with an icon and a bold title. `[!tip]-` (folded) is an expandable quote |
+| `[links](https://…)` | links |
+| `[[Other note]]` and `[text](other-note.md)` | links to that note's public page if it is published, plain text if not |
+| Tables | an aligned monospace table |
+| `$math$` | monospace |
+| `%%comments%%`, `<!-- comments -->`, image embeds, Dataview and Mermaid blocks | left out |
+
+Telegram allows 4096 characters in a message and 1024 in a photo caption. A longer note is split into several messages, between paragraphs where it can, or at a line, sentence, or word when one paragraph is too long. Formatting carries across the cut. Only the first message plays a notification sound.
+
+**Summary and link** posts the title, the first paragraph, and the link. Choose it in settings, or for one note with `telegram_format: summary` (or `full`) in its frontmatter.
+
+### Cover photo
+
+With **Cover photo** on, the first image becomes a Telegram photo, and the post is its caption. If the post is longer than a caption, the caption holds the beginning and the rest follows in more messages. The image comes from the first of these that is a JPG, PNG, or WebP file of at most 10 MB:
+
+1. `telegram_image` in the frontmatter. This is used even when **Cover photo** is off. `telegram_image: false` sends no photo for that note.
+2. `cover`, `image`, or `banner` in the frontmatter.
+3. The first image in the note: `![[photo.png]]`, `![](attachments/photo.jpg)`, or `<img src="…">`.
+
+Vault images are uploaded. `https://` images are fetched by Telegram. If Telegram refuses the image (too large, odd dimensions, a URL it cannot load), the note is posted without it and you are told why.
+
+### Link preview
+
+Telegram can show the page's preview card (title, image, and description from the site) under or over the post. **Link preview** picks the size and the position, or turns it off. `telegram_preview: off` (or `small-above`, `large-below`, and so on) overrides it for one note. The card goes on the last message, the one with the link. It is left off when a cover photo is sent, so the post does not show the same picture twice.
+
+### Updating a post
+
+The post's message ids are stored in the note: `telegram_message_id` (the first message), `telegram_message_ids` (all of them, for a post of several messages), `telegram_media: photo` when it starts with a photo, and `telegram_hash`, a fingerprint per message. The site drops those keys (it only keeps title, icon, order, and updated), so a pull copies them back onto the site text, along with `telegram`, `telegram_format`, `telegram_image`, and `telegram_preview`. The note body is what revisions compare, so the ids do not look like a different essay. Other devices that share the vault see the same ids.
+
+**Post current note to Telegram** on a note that was already posted offers:
+
+- **Update post.** Edits only the messages that changed. A photo is uploaded again only if the image changed. If the note got shorter, the extra messages are deleted. If it got longer, the new messages are sent as replies to the post, because Telegram adds them at the bottom of the channel.
+- **Replace post.** Sends the post again, in order, then deletes the old messages. Use it when the note grew a lot, or when a cover photo was added or removed: Telegram cannot turn a text message into a photo, or back.
+- **Post new.** Sends a new post and leaves the old one alone.
+
+If Telegram cannot delete an old message (bots can only delete their messages for a limited time), the notice tells you which message to delete by hand. If a message of the post was deleted in Telegram, Update says so; use Replace or Post new.
+
+### Posting on publish
+
+`telegram: true` in the frontmatter opts that note in. A manual **Publish current note** (the command or the ribbon) then posts it after a successful publish, if the note has at least 40 characters of text once frontmatter and Markdown are stripped, and no message id yet. That first post does not show the dialog. Skipping it is on purpose: the flag plus the publish is the request, and the dialog stays on **Post current note to Telegram** and **Publish and post to Telegram**. A shorter note is skipped with a short notice. **Publish on save** never posts and never edits the channel, because it runs while you are still typing.
+
+Publishing a note that already has a post updates the messages that changed, and deletes extra messages if it got shorter. It does not add messages on its own, and it does not swap a photo post for a text post; it asks you to run **Post current note to Telegram** instead.
+
+### When something goes wrong
+
+- Telegram's rate limits are waited out automatically when the wait is under a minute.
+- If a long post fails part-way, the messages that went out are still recorded. **Update post** sends the rest.
+- If Telegram cannot read the formatting of a message, that message is sent as plain text, and you are told.
+- Notices never include the bot token.
 
 ## Create the token
 
@@ -205,7 +265,7 @@ npm test
 npm run build
 ```
 
-`npm test` runs the path mapping, sync, auto-pull, and Telegram tests with a fake notes API, a fake clock, and a fake Bot API. `npm run build` typechecks, bundles `src/main.ts` to `main.js` with esbuild, and checks that the bundle does not call Node or `fetch`.
+`npm test` runs the path mapping, sync, auto-pull, Markdown-to-Telegram, and Telegram posting tests with a fake notes API, a fake clock, and a fake Bot API that keeps a channel of messages. `npm run build` typechecks, bundles `src/main.ts` to `main.js` with esbuild, and checks that the bundle does not call Node or `fetch`.
 
 `npm run dev` watches and rebuilds while you work.
 
@@ -233,4 +293,6 @@ A second device should not have to type the token. Obsidian can open `obsidian:/
 
 Automatic pull is the same function as **Pull notes from site**. The schedule is a short timeout after the layout is ready, plus an interval. Both are cancelled on unload and when the toggle or the interval changes. A pull in progress holds a lock. The interval does not start a second one; the command runs after the lock clears. Notices on the automatic path are filtered. No vault change and no new error means silence, so a phone in a pocket does not toast “already up to date” or the same offline error every five minutes. Conflict copies are unchanged: unpublished local edits stay in the note, and the site copy is written beside it.
 
-Telegram is a separate manual step. The bot token stays in plugin data, like the notes API token. The message id stays in the note, because that file is what another device already syncs. Publish on save does not call `sendMessage` or `editMessageText`. A manual publish of a note with `telegram: true` may send the first post, and a later manual publish may edit it, and only when the rendered text changed. `message is not modified` is treated as success. HTTP still goes through `requestUrl`.
+Telegram is a separate manual step. The bot token stays in plugin data, like the notes API token. The message ids stay in the note, because that file is what another device already syncs. Publish on save does not call the Bot API. A manual publish of a note with `telegram: true` may send the first post, and a later manual publish may edit it, and only the messages whose rendered text changed. `message is not modified` is treated as success.
+
+The note is parsed into blocks of styled runs (text plus the marks that apply to it), not into an HTML string. That makes the visible length exact, which is what Telegram limits, lets a long note be cut between messages without breaking a tag, and lets the dialog draw the same runs that become the HTML. Telegram's nesting rules are applied when runs are built: nothing inside `code` or `pre`, no quote inside a quote. Photos are uploaded as `multipart/form-data` built by hand into an `ArrayBuffer`, because `requestUrl` takes one on every platform and `FormData` is not something it can send. HTTP still goes through `requestUrl`.

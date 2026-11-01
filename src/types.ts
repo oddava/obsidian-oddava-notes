@@ -21,6 +21,8 @@ export interface HttpRequest {
 	url: string;
 	headers: Record<string, string>;
 	body?: string;
+	/** Binary body, such as a multipart photo upload. Sent instead of `body`. */
+	bodyBytes?: ArrayBuffer;
 }
 
 export interface HttpResponse {

@@ -24,18 +24,112 @@ Obsidian loads this file when the plugin is enabled.
 	margin-top: 4px;
 }
 
+.oddava-notes-telegram-facts {
+	margin: 0 0 0.5em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
 .oddava-notes-telegram-warning {
+	margin: 0.25em 0;
 	color: var(--text-warning);
 }
 
-.oddava-notes-telegram-preview {
-	white-space: pre-wrap;
-	margin: 0.5em 0 0;
-	padding: 8px 10px;
-	max-height: 40vh;
+.oddava-notes-telegram-messages {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	max-height: 55vh;
+	margin-top: 0.75em;
 	overflow: auto;
-	border-radius: var(--radius-s);
+}
+
+.oddava-notes-telegram-message {
+	padding: 8px 12px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
 	background: var(--background-secondary);
+}
+
+.oddava-notes-telegram-message-header {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 6px;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.oddava-notes-telegram-text {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	line-height: 1.45;
+	user-select: text;
+}
+
+.oddava-notes-telegram-text pre {
+	margin: 4px 0;
+	padding: 6px 8px;
+	white-space: pre-wrap;
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+}
+
+.oddava-notes-telegram-text blockquote {
+	margin: 4px 0;
+	padding: 2px 0 2px 10px;
+	border-left: 3px solid var(--interactive-accent);
+}
+
+.oddava-notes-telegram-text blockquote.oddava-notes-telegram-expandable {
+	max-height: 4.5em;
+	overflow: hidden;
+	mask-image: linear-gradient(to bottom, black 60%, transparent);
+}
+
+.oddava-notes-telegram-spoiler {
+	border-radius: 3px;
+	background: var(--text-faint);
+	color: transparent;
+}
+
+.oddava-notes-telegram-spoiler:hover {
+	background: none;
+	color: inherit;
+}
+
+.oddava-notes-telegram-photo img {
+	display: block;
+	max-width: 100%;
+	max-height: 240px;
+	margin-bottom: 8px;
+	border-radius: var(--radius-s);
+	object-fit: cover;
+}
+
+.oddava-notes-telegram-photo-placeholder,
+.oddava-notes-telegram-link-card {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 6px 0;
+	padding: 6px 8px;
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow-wrap: anywhere;
+}
+
+.oddava-notes-telegram-link-card {
+	border-left: 3px solid var(--interactive-accent);
+}
+
+.oddava-notes-telegram-photo-placeholder svg,
+.oddava-notes-telegram-link-card svg {
+	flex: none;
+	width: 14px;
+	height: 14px;
 }
 
 .oddava-notes-telegram-actions {

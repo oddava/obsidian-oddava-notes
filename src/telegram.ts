@@ -1,14 +1,29 @@
 import { normalizeBaseUrl } from './api';
 import { contentFingerprint } from './fingerprint';
 import {
+	readFrontmatterScalar,
 	readTelegramFrontmatter,
 	splitFrontmatter,
-	readFrontmatterScalar,
 	upsertFrontmatter,
 } from './frontmatter';
-import { redact } from './messages';
 import { parseApiPath, toApiPath } from './paths';
-import type { HttpClient } from './types';
+import {
+	normalizeTelegramChannel,
+	type LinkPreviewOptions,
+} from './telegram-api';
+import {
+	markdownToBlocks,
+	packBlocks,
+	renderRuns,
+	runsToPlain,
+	TELEGRAM_CAPTION_LIMIT,
+	TELEGRAM_TEXT_LIMIT,
+	type Block,
+	type FormatContext,
+	type RenderedText,
+} from './telegram-format';
+
+export { normalizeTelegramChannel, telegramTokenProblem } from './telegram-api';
 
 /** Where posts go when settings have no channel yet. */
 export const DEFAULT_TELEGRAM_CHANNEL = '@justoddava';
@@ -19,25 +34,94 @@ export const DEFAULT_TELEGRAM_CHANNEL = '@justoddava';
  */
 export const NEARLY_EMPTY_CHARS = 40;
 
-export const EXCERPT_MAX_CHARS = 220;
+/** Summary posts: the first paragraph, cut at a word near this length. */
+export const EXCERPT_MAX_CHARS = 280;
 
-export class TelegramPostDeleted extends Error {
-	constructor() {
-		super('That Telegram post was deleted. Post to Telegram can send a new one.');
-		this.name = 'TelegramPostDeleted';
-	}
+/** Telegram's upload limit for photos. */
+export const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+
+/** Formats `sendPhoto` accepts. GIF and SVG are not photos to Telegram. */
+export const PHOTO_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp'] as const;
+
+export type TelegramFormat = 'full' | 'summary';
+export const TELEGRAM_FORMATS: Record<TelegramFormat, string> = {
+	full: 'Full note',
+	summary: 'Summary and link',
+};
+
+export type TelegramLinkPreview = 'large-below' | 'large-above' | 'small-below' | 'small-above' | 'off';
+export const TELEGRAM_LINK_PREVIEWS: Record<TelegramLinkPreview, string> = {
+	'large-below': 'Large card below the text',
+	'large-above': 'Large card above the text',
+	'small-below': 'Small card below the text',
+	'small-above': 'Small card above the text',
+	off: 'No link preview',
+};
+
+export function telegramFormat(value: unknown): TelegramFormat | undefined {
+	return value === 'full' || value === 'summary' ? value : undefined;
 }
+
+export function telegramLinkPreview(value: unknown): TelegramLinkPreview | undefined {
+	if (typeof value !== 'string') return undefined;
+	const lower = value.trim().toLowerCase();
+	if (lower in TELEGRAM_LINK_PREVIEWS) return lower as TelegramLinkPreview;
+	if (lower === 'false' || lower === 'none' || lower === 'no') return 'off';
+	if (lower === 'true' || lower === 'large' || lower === 'yes') return 'large-below';
+	if (lower === 'small') return 'small-below';
+	if (lower === 'above') return 'large-above';
+	return undefined;
+}
+
+/** Where the cover photo comes from. Vault files are read and uploaded on send. */
+export type TelegramCover =
+	| { kind: 'url'; url: string; label: string }
+	| { kind: 'vault'; path: string; label: string; size: number; mtime: number };
+
+/** One Telegram message of a post. */
+export interface TelegramPart {
+	kind: 'text' | 'photo';
+	/** Message text, or the photo caption. */
+	text: RenderedText;
+	/** Text messages only. */
+	linkPreview?: LinkPreviewOptions;
+	/**
+	 * What was sent, for deciding whether an edit is needed. A photo part's
+	 * hash is the cover's fingerprint followed by the caption's.
+	 */
+	hash: string;
+}
+
+/** What the note remembers about its channel post. */
+export interface TelegramRecord {
+	messageIds: number[];
+	media?: 'photo';
+	hashes: string[];
+}
+
+/** How the post on the channel compares with the note now. */
+export type TelegramLayoutChange =
+	| { kind: 'new' }
+	| { kind: 'same'; changed: number[] }
+	| { kind: 'grows'; from: number; to: number; changed: number[] }
+	| { kind: 'shrinks'; from: number; to: number; changed: number[] }
+	| { kind: 'incompatible'; reason: string };
 
 export interface TelegramPostDraft {
 	apiPath: string;
 	title: string;
-	excerpt: string;
 	url: string;
-	/** Exact words of the post. Telegram bolds the title line. */
-	plain: string;
-	html: string;
-	/** Set when this note already has telegram_message_id. */
-	messageId?: number;
+	channel: string;
+	format: TelegramFormat;
+	linkPreview: TelegramLinkPreview;
+	parts: TelegramPart[];
+	/** The same post without the cover photo, for when Telegram refuses the image. */
+	textOnly: TelegramPart[] | null;
+	cover?: TelegramCover;
+	/** Set when this note already has a channel post. */
+	existing?: TelegramRecord;
+	change: TelegramLayoutChange;
+	/** True when the channel post already matches, message for message. */
 	unchanged: boolean;
 	warnings: string[];
 }
@@ -51,34 +135,11 @@ export type TelegramFollowUp =
 	| { kind: 'skip' }
 	| { kind: 'too-short'; notice: string }
 	| { kind: 'post' }
-	| { kind: 'edit'; messageId: number; unchanged: boolean };
+	| { kind: 'edit'; unchanged: boolean }
+	| { kind: 'confirm'; notice: string };
 
 const HEADING_PATTERN = /^#{1,6}\s+(.+?)\s*#*\s*$/m;
 const TOO_SHORT_NOTICE = 'Not posted to Telegram. The note is still too short.';
-
-/**
- * Bot tokens from BotFather look like `123456789:AA...`.
- * Anything else is refused before a request is built, so a pasted sentence
- * cannot change the Telegram URL.
- */
-export function telegramTokenProblem(token: string): string | null {
-	const trimmed = token.trim();
-	if (!trimmed) return 'Add the Telegram bot token in settings.';
-	if (!/^\d+:[A-Za-z0-9_-]+$/.test(trimmed)) {
-		return 'The Telegram bot token does not look like a token from BotFather.';
-	}
-	return null;
-}
-
-/** `@channel` or a numeric id such as `-1001234567890`. Usernames may omit the @. */
-export function normalizeTelegramChannel(value: string): string | null {
-	const trimmed = value.trim();
-	if (!trimmed) return null;
-	if (/^-?\d{5,20}$/.test(trimmed)) return trimmed;
-	const withAt = trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
-	if (/^@[A-Za-z][A-Za-z0-9_]{4,31}$/.test(withAt)) return withAt;
-	return null;
-}
 
 /**
  * Canonical public URL. The site builds `href` as `/notes/` plus the source
@@ -99,20 +160,33 @@ export function publicNoteUrl(baseUrl: string, apiPath: string): string | null {
  * Manual Publish may post or edit. Publish on save must not: it runs while
  * the note is still being typed. Publish-and-post opens the confirmation
  * modal itself, so it must not also send here.
+ *
+ * An edit that would add messages, or swap a photo post for a text post, is
+ * not done silently: new messages land at the bottom of the channel, so the
+ * person chooses in the Post to Telegram dialog.
  */
 export function telegramFollowUp(
 	source: 'command' | 'autosave' | 'publish-and-post',
 	content: string,
-	plain: string,
+	draft: TelegramPostDraft | null,
 ): TelegramFollowUp {
 	if (source !== 'command') return { kind: 'skip' };
 	const meta = readTelegramFrontmatter(content);
-	if (meta.messageId) {
-		return {
-			kind: 'edit',
-			messageId: meta.messageId,
-			unchanged: meta.hash === contentFingerprint(plain),
-		};
+	if (meta.messageIds.length > 0) {
+		if (!draft) return { kind: 'skip' };
+		const change = draft.change;
+		if (change.kind === 'same') return { kind: 'edit', unchanged: change.changed.length === 0 };
+		if (change.kind === 'shrinks') return { kind: 'edit', unchanged: false };
+		if (change.kind === 'grows') {
+			return {
+				kind: 'confirm',
+				notice: `The Telegram post needs ${change.to} messages now and has ${change.from}. Run Post to Telegram to update or replace it.`,
+			};
+		}
+		if (change.kind === 'incompatible') {
+			return { kind: 'confirm', notice: `${change.reason} Run Post to Telegram to replace the post.` };
+		}
+		return { kind: 'skip' };
 	}
 	if (!meta.enabled) return { kind: 'skip' };
 	if (plainBody(splitFrontmatter(content).body).length < NEARLY_EMPTY_CHARS) {
@@ -121,7 +195,7 @@ export function telegramFollowUp(
 	return { kind: 'post' };
 }
 
-export function prepareTelegramPost(input: {
+export interface PrepareTelegramInput {
 	vaultPath: string;
 	syncFolder: string;
 	content: string;
@@ -129,7 +203,19 @@ export function prepareTelegramPost(input: {
 	channel: string;
 	publishedRevision?: string;
 	fingerprint?: string;
-}): TelegramPrepareResult {
+	/** Setting. `telegram_format` in the note wins. */
+	format?: TelegramFormat;
+	/** Setting. `telegram_preview` in the note wins. */
+	linkPreview?: TelegramLinkPreview;
+	/** Resolved cover photo, if any. */
+	cover?: TelegramCover | null;
+	/** Problems found while resolving the cover. */
+	coverWarnings?: string[];
+	/** Maps links to other notes onto their public pages. */
+	resolveNote?: FormatContext['resolveNote'];
+}
+
+export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepareResult {
 	const mapped = toApiPath(input.syncFolder, input.vaultPath);
 	if (!mapped.ok) return { ok: false, reason: mapped.reason };
 
@@ -150,20 +236,46 @@ export function prepareTelegramPost(input: {
 		return { ok: false, reason: 'The site URL is not a valid http(s) origin. Use https://oddava.me.' };
 	}
 
-	const { title, excerpt } = noteTitleAndExcerpt(input.content, mapped.apiPath);
-	const plain = plainPost(title, excerpt, url);
 	const meta = readTelegramFrontmatter(input.content);
-	const warnings: string[] = [];
+	const format = telegramFormat(meta.format) ?? input.format ?? 'full';
+	const linkPreview = telegramLinkPreview(meta.preview) ?? input.linkPreview ?? 'large-below';
+	const cover = input.cover ?? undefined;
+	const { title, excerpt } = noteTitleAndExcerpt(input.content, mapped.apiPath);
+	const blocks =
+		format === 'full'
+			? fullBlocks(input.content, title, url, { resolveNote: input.resolveNote })
+			: summaryBlocks(title, excerpt, url);
+
+	const parts = buildParts(blocks, cover, url, linkPreview);
+	const textOnly = cover ? buildParts(blocks, undefined, url, linkPreview) : null;
+	const existing: TelegramRecord | undefined =
+		meta.messageIds.length > 0
+			? { messageIds: meta.messageIds, media: meta.media, hashes: meta.hashes }
+			: undefined;
+	const change = compareLayout(existing, parts);
+
+	const warnings: string[] = [...(input.coverWarnings ?? [])];
 	if (plainBody(splitFrontmatter(input.content).body).length < NEARLY_EMPTY_CHARS) {
 		warnings.push('This note looks nearly empty. Send it only if that is what you want.');
 	}
 	if (input.fingerprint && contentFingerprint(input.content) !== input.fingerprint) {
 		warnings.push('This device has edits that are not on the site yet. The link opens the published page.');
 	}
-	if (meta.messageId) {
-		warnings.push(
-			`Already posted to ${channel} as message ${meta.messageId}. Update that post, or send a new one.`,
-		);
+	if (existing) {
+		const count = existing.messageIds.length;
+		const what = count === 1 ? `message ${existing.messageIds[0]}` : `${count} messages`;
+		warnings.push(`Already posted to ${channel} as ${what}. Update that post, replace it, or send a new one.`);
+		if (change.kind === 'grows') {
+			const extra = change.to - change.from;
+			warnings.push(
+				`The note is longer now. Update adds ${extra === 1 ? 'a message' : `${extra} messages`} at the end of the channel, as a reply to the post. Replace deletes the old post and sends it again in order.`,
+			);
+		} else if (change.kind === 'shrinks') {
+			const extra = change.from - change.to;
+			warnings.push(`The note is shorter now. Update deletes the last ${extra === 1 ? 'message' : `${extra} messages`} of the post.`);
+		} else if (change.kind === 'incompatible') {
+			warnings.push(`${change.reason} Replace the post or send a new one.`);
+		}
 	}
 
 	return {
@@ -171,164 +283,226 @@ export function prepareTelegramPost(input: {
 		draft: {
 			apiPath: mapped.apiPath,
 			title,
-			excerpt,
 			url,
-			plain,
-			html: telegramHtml(title, excerpt, url),
-			messageId: meta.messageId,
-			unchanged: meta.messageId !== undefined && meta.hash === contentFingerprint(plain),
+			channel,
+			format,
+			linkPreview,
+			parts,
+			textOnly,
+			cover,
+			existing,
+			change,
+			unchanged: change.kind === 'same' && change.changed.length === 0,
 			warnings,
 		},
 	};
 }
 
-export function plainPost(title: string, excerpt: string, url: string): string {
-	const parts = [title];
-	if (excerpt) parts.push(excerpt);
-	parts.push(url);
-	return parts.join('\n\n');
+/** Title in bold, the whole note, then a link to the page. */
+export function fullBlocks(content: string, title: string, url: string, context: FormatContext = {}): Block[] {
+	const { body } = splitFrontmatter(content);
+	const blocks = markdownToBlocks(body, context);
+	const first = blocks[0];
+	if (first?.kind === 'heading' && sameText(runsToPlain(first.runs), title)) blocks.shift();
+	return [titleBlock(title), ...blocks, footerBlock(url)];
 }
 
-export function telegramHtml(title: string, excerpt: string, url: string): string {
-	const parts = [`<b>${escapeHtml(title)}</b>`];
-	if (excerpt) parts.push(escapeHtml(excerpt));
-	parts.push(escapeHtml(url));
-	return parts.join('\n\n');
+/** Title in bold, the first paragraph, then a link to the page. */
+export function summaryBlocks(title: string, excerpt: string, url: string): Block[] {
+	const blocks: Block[] = [titleBlock(title)];
+	if (excerpt) blocks.push({ kind: 'paragraph', runs: [{ text: excerpt, marks: [] }] });
+	blocks.push(footerBlock(url));
+	return blocks;
 }
 
-export function escapeHtml(value: string): string {
-	return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function titleBlock(title: string): Block {
+	return { kind: 'title', runs: [{ text: title, marks: [{ type: 'b' }] }] };
 }
 
-/** Write the id (and a hash of the text we sent) into the note the user has now. */
-export function withTelegramMessageId(content: string, messageId: number, plain: string): string {
-	return upsertFrontmatter(content, {
-		telegram_message_id: String(messageId),
-		telegram_hash: contentFingerprint(plain),
-	});
-}
-
-export async function sendTelegramMessage(
-	http: HttpClient,
-	input: { token: string; chatId: string; html: string },
-): Promise<{ messageId: number }> {
-	const body = await telegramRequest(http, input.token, 'sendMessage', {
-		chat_id: normalizeTelegramChannel(input.chatId),
-		text: input.html,
-		parse_mode: 'HTML',
-	});
-	const result = isRecord(body) ? body.result : undefined;
-	const messageId = isRecord(result) ? result.message_id : undefined;
-	if (typeof messageId !== 'number' || !Number.isInteger(messageId) || messageId <= 0) {
-		throw new Error('Telegram did not return a message id.');
-	}
-	return { messageId };
-}
-
-export async function editTelegramMessage(
-	http: HttpClient,
-	input: { token: string; chatId: string; messageId: number; html: string },
-): Promise<'updated' | 'unchanged'> {
+function footerBlock(url: string): Block {
+	let host = url;
 	try {
-		await telegramRequest(http, input.token, 'editMessageText', {
-			chat_id: normalizeTelegramChannel(input.chatId),
-			message_id: input.messageId,
-			text: input.html,
-			parse_mode: 'HTML',
-		});
-		return 'updated';
-	} catch (error) {
-		if (error instanceof TelegramUnchanged) return 'unchanged';
-		throw error;
+		host = new URL(url).host;
+	} catch {
+		// Keep the URL as the label.
 	}
+	return { kind: 'footer', runs: [{ text: `Read on ${host}`, marks: [{ type: 'a', href: url }] }] };
 }
 
-class TelegramUnchanged extends Error {
-	constructor() {
-		super('message is not modified');
-		this.name = 'TelegramUnchanged';
-	}
-}
-
-async function telegramRequest(
-	http: HttpClient,
-	token: string,
-	method: 'sendMessage' | 'editMessageText',
-	payload: { chat_id: string | null; text: string; parse_mode: 'HTML'; message_id?: number },
-): Promise<unknown> {
-	const tokenProblem = telegramTokenProblem(token);
-	if (tokenProblem) throw new Error(tokenProblem);
-	if (!payload.chat_id) throw new Error('Set a Telegram channel, like @justoddava.');
-
-	const trimmed = token.trim();
-	const url = `https://api.telegram.org/bot${trimmed}/${method}`;
-	let status = 0;
-	let body: unknown;
-	try {
-		const response = await http({
-			method: 'POST',
-			url,
-			headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-			body: JSON.stringify({ ...payload, chat_id: payload.chat_id }),
-		});
-		status = response.status;
-		body = response.body;
-	} catch (error) {
-		const message = error instanceof Error && error.message ? error.message : 'Could not reach Telegram.';
-		throw new Error(redact(message, trimmed));
-	}
-
-	if (isRecord(body) && body.ok === true) return body;
-	const description = isRecord(body) && typeof body.description === 'string' ? body.description : '';
-	if (description.toLowerCase().includes('message is not modified')) {
-		throw new TelegramUnchanged();
-	}
-	if (isDeletedTelegramMessage(description)) {
-		throw new TelegramPostDeleted();
-	}
-	throw new Error(explainTelegramFailure(status, body, trimmed));
-}
-
-export function explainTelegramFailure(status: number, body: unknown, token?: string): string {
-	const description = isRecord(body) && typeof body.description === 'string' ? body.description : '';
-	const lower = description.toLowerCase();
-	let message: string;
-	if (status === 401 || lower.includes('unauthorized')) {
-		message = 'The Telegram bot token was rejected. Check the token in settings.';
-	} else if (lower.includes('chat not found') || lower.includes('chat_id is empty')) {
-		message =
-			'Telegram could not find that channel. Check the channel id, and make sure the bot is an admin.';
-	} else if (
-		status === 403 ||
-		lower.includes('not enough rights') ||
-		lower.includes('need administrator') ||
-		lower.includes('bot is not a member') ||
-		lower.includes('have no rights')
-	) {
-		message = 'Telegram refused the post. Add the bot as an admin of the channel, with permission to post.';
-	} else if (status === 429 || lower.includes('too many requests')) {
-		message = 'Telegram is rate limiting posts. Wait a moment and try again.';
-	} else if (lower.includes('message is too long')) {
-		message = 'The post is longer than Telegram allows.';
-	} else if (isDeletedTelegramMessage(description)) {
-		message = new TelegramPostDeleted().message;
-	} else if (description) {
-		message = `Telegram refused the post. ${description}`;
-	} else {
-		message = `Telegram returned HTTP ${status}.`;
-	}
-	return redact(message, token);
-}
-
-function isDeletedTelegramMessage(description: string): boolean {
-	const lower = description.toLowerCase();
-	return (
-		lower.includes('message to edit not found') ||
-		lower.includes('message to be edited not found') ||
-		lower.includes('message_id_invalid') ||
-		lower.includes("message can't be edited") ||
-		lower.includes('message to delete not found')
+/**
+ * Split blocks into messages and attach the photo and link preview.
+ * With a cover, the first message is the photo and its caption holds as much
+ * of the post as 1024 characters allow. The page's link preview goes on the
+ * last text message, the one with the link. It is left off when a cover photo
+ * is sent, so the post does not show the same picture twice.
+ */
+export function buildParts(
+	blocks: Block[],
+	cover: TelegramCover | undefined,
+	url: string,
+	linkPreview: TelegramLinkPreview,
+): TelegramPart[] {
+	const messages = packBlocks(blocks, (index) =>
+		index === 0 && cover ? TELEGRAM_CAPTION_LIMIT : TELEGRAM_TEXT_LIMIT,
 	);
+	const parts: TelegramPart[] = [];
+	messages.forEach((runs, index) => {
+		const text = renderRuns(runs);
+		if (index === 0 && cover) {
+			parts.push({ kind: 'photo', text, hash: coverFingerprint(cover) + contentFingerprint(text.html) });
+			return;
+		}
+		const last = index === messages.length - 1;
+		const preview: LinkPreviewOptions =
+			last && !cover ? linkPreviewOptions(linkPreview, url) : { is_disabled: true };
+		parts.push({ kind: 'text', text, linkPreview: preview, hash: textFingerprint(text.html, preview) });
+	});
+	if (parts.length === 0 && cover) {
+		const text = renderRuns([]);
+		parts.push({ kind: 'photo', text, hash: coverFingerprint(cover) + contentFingerprint('') });
+	}
+	return parts;
+}
+
+export function linkPreviewOptions(setting: TelegramLinkPreview, url: string): LinkPreviewOptions {
+	switch (setting) {
+		case 'off':
+			return { is_disabled: true };
+		case 'large-above':
+			return { url, prefer_large_media: true, show_above_text: true };
+		case 'small-below':
+			return { url, prefer_small_media: true };
+		case 'small-above':
+			return { url, prefer_small_media: true, show_above_text: true };
+		default:
+			return { url, prefer_large_media: true };
+	}
+}
+
+function textFingerprint(html: string, preview: LinkPreviewOptions): string {
+	return contentFingerprint(`${html}\u0001${JSON.stringify(preview)}`);
+}
+
+export function coverFingerprint(cover: TelegramCover): string {
+	return contentFingerprint(
+		cover.kind === 'url' ? `url:${cover.url}` : `vault:${cover.path}:${cover.size}:${cover.mtime}`,
+	);
+}
+
+/** True when a photo part's image (not its caption) differs from what was sent. */
+export function coverChanged(previousHash: string | undefined, part: TelegramPart): boolean {
+	if (part.kind !== 'photo') return false;
+	return !previousHash || previousHash.slice(0, 8) !== part.hash.slice(0, 8);
+}
+
+export function compareLayout(existing: TelegramRecord | undefined, parts: TelegramPart[]): TelegramLayoutChange {
+	if (!existing || existing.messageIds.length === 0) return { kind: 'new' };
+	const hadPhoto = existing.media === 'photo';
+	const hasPhoto = parts[0]?.kind === 'photo';
+	if (hadPhoto && !hasPhoto) {
+		return {
+			kind: 'incompatible',
+			reason: 'The post on Telegram starts with a photo, and this note has no cover image now. Telegram cannot turn a photo message into text.',
+		};
+	}
+	if (!hadPhoto && hasPhoto) {
+		return {
+			kind: 'incompatible',
+			reason: 'This note has a cover image now, and the post on Telegram is text. Telegram cannot add a photo to a text message.',
+		};
+	}
+	const from = existing.messageIds.length;
+	const to = parts.length;
+	const changed: number[] = [];
+	for (let index = 0; index < Math.min(from, to); index += 1) {
+		if (existing.hashes[index] !== parts[index]?.hash) changed.push(index);
+	}
+	if (to > from) return { kind: 'grows', from, to, changed };
+	if (to < from) return { kind: 'shrinks', from, to, changed };
+	return { kind: 'same', changed };
+}
+
+/** Write the record into the note the user has now. Other keys stay put. */
+export function withTelegramRecord(content: string, record: TelegramRecord): string {
+	if (record.messageIds.length === 0) {
+		return upsertFrontmatter(content, {
+			telegram_message_id: null,
+			telegram_message_ids: null,
+			telegram_media: null,
+			telegram_hash: null,
+		});
+	}
+	return upsertFrontmatter(content, {
+		telegram_message_id: String(record.messageIds[0]),
+		telegram_message_ids: record.messageIds.length > 1 ? record.messageIds.join(',') : null,
+		telegram_media: record.media === 'photo' ? 'photo' : null,
+		telegram_hash: record.hashes.join(','),
+	});
+}
+
+/**
+ * Cover photo candidates in order: `telegram_image`, `cover`, `image`, and
+ * `banner` in the frontmatter, then images embedded in the body. Each is a
+ * URL, a vault path, or a wikilink target. `telegram_image: false` turns the
+ * photo off for that note.
+ */
+export function coverCandidates(content: string): {
+	disabled: boolean;
+	/** `telegram_image`, which is used even when cover photos are off in settings. */
+	explicit?: string;
+	candidates: string[];
+} {
+	const { raw, body } = splitFrontmatter(content);
+	const candidates: string[] = [];
+	let explicitRef: string | undefined;
+	if (raw !== null) {
+		const explicit = readFrontmatterScalar(raw, 'telegram_image')?.trim();
+		if (explicit && /^(false|no|none|off)$/i.test(explicit)) return { disabled: true, candidates: [] };
+		explicitRef = explicit ? cleanImageRef(explicit) || undefined : undefined;
+		for (const key of ['telegram_image', 'cover', 'image', 'banner']) {
+			const value = readFrontmatterScalar(raw, key);
+			const ref = value ? cleanImageRef(value) : '';
+			if (ref) candidates.push(ref);
+		}
+	}
+	const withoutCode = body.replace(/(^|\n)\s*(`{3,}|~{3,})[\s\S]*?\n\s*\2[^\n]*/g, '\n').replace(/`[^`\n]*`/g, '');
+	const pattern = /!\[\[([^\]\n]+)\]\]|!\[[^\]\n]*\]\(([^)\n]+)\)|<img\b[^>]*\bsrc=["']([^"']+)["']/gi;
+	for (const match of withoutCode.matchAll(pattern)) {
+		const ref = cleanImageRef(match[1] ?? match[2] ?? match[3] ?? '');
+		if (ref) candidates.push(ref);
+	}
+	return { disabled: false, explicit: explicitRef, candidates: [...new Set(candidates)] };
+}
+
+function cleanImageRef(value: string): string {
+	let ref = value.trim();
+	if (ref.startsWith('"') && ref.endsWith('"')) ref = ref.slice(1, -1).trim();
+	if (ref.startsWith('[[') && ref.endsWith(']]')) ref = ref.slice(2, -2);
+	if (ref.startsWith('![[') && ref.endsWith(']]')) ref = ref.slice(3, -2);
+	if (/^https?:\/\//i.test(ref)) return ref.split(/\s+/)[0] ?? '';
+	// Markdown link with a title: `path "title"`. Angle brackets allow spaces.
+	ref = ref.replace(/\s+(?:"[^"]*"|'[^']*')$/, '');
+	if (ref.startsWith('<') && ref.endsWith('>')) ref = ref.slice(1, -1);
+	ref = ref.split('|')[0] ?? '';
+	ref = ref.split('#')[0] ?? '';
+	try {
+		ref = decodeURIComponent(ref);
+	} catch {
+		// Keep it as written.
+	}
+	return ref.trim();
+}
+
+export function isPhotoPath(path: string): boolean {
+	const extension = path.split('?')[0]?.split('.').pop()?.toLowerCase() ?? '';
+	return (PHOTO_EXTENSIONS as readonly string[]).includes(extension);
+}
+
+export function photoMimeType(path: string): string {
+	const extension = path.split('.').pop()?.toLowerCase();
+	if (extension === 'png') return 'image/png';
+	if (extension === 'webp') return 'image/webp';
+	return 'image/jpeg';
 }
 
 export function noteTitleAndExcerpt(content: string, apiPath: string): { title: string; excerpt: string } {
@@ -337,6 +511,20 @@ export function noteTitleAndExcerpt(content: string, apiPath: string): { title: 
 	const leaf = apiPath.split('/').pop()?.replace(/\.md$/i, '') ?? apiPath;
 	const title = frontmatterTitle || titleFromBody(body, leaf);
 	return { title, excerpt: excerptFromBody(body) };
+}
+
+/** Short text that says what the post is, for notices and the dialog. */
+export function describeParts(parts: TelegramPart[]): string {
+	const photo = parts[0]?.kind === 'photo';
+	const count = parts.length;
+	if (photo && count === 1) return 'a photo with a caption';
+	if (photo) return `a photo and ${count - 1} more ${count === 2 ? 'message' : 'messages'}`;
+	return count === 1 ? 'one message' : `${count} messages`;
+}
+
+function sameText(left: string, right: string): boolean {
+	const clean = (value: string): string => value.replace(/\s+/g, ' ').trim().toLowerCase();
+	return clean(left) === clean(right);
 }
 
 function titleFromBody(body: string, leaf: string): string {
@@ -359,7 +547,7 @@ function plainBody(body: string): string {
 
 function plainParts(body: string): string[] {
 	const parts: string[] = [];
-	for (const block of body.split(/\n{2,}/)) {
+	for (const block of body.replace(/%%[\s\S]*?%%/g, '').split(/\n{2,}/)) {
 		const line = block.trim();
 		if (!line || line.startsWith('#') || line.startsWith('![') || line.startsWith('```')) continue;
 		if (/^<(?:figure|picture|img|video|audio)\b/i.test(line)) continue;
@@ -374,6 +562,7 @@ function plainParts(body: string): string[] {
 function stripInline(value: string): string {
 	return value
 		.replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+		.replace(/!\[\[[^\]]*\]\]/g, '')
 		.replace(/\[\[[^\]|\n]+\|([^\]\n]+)\]\]/g, '$1')
 		.replace(/\[\[([^\]|\n]+)\]\]/g, '$1')
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -398,8 +587,4 @@ function humanizeSlug(value: string): string {
 		.filter(Boolean)
 		.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
 		.join(' ');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
