@@ -5,6 +5,16 @@ on:
     tags:
       # Obsidian plugin tags have no v prefix: 1.0.0, not v1.0.0.
       - '[0-9]*.[0-9]*.[0-9]*'
+  # Run it by hand to attach the files to a release that already exists,
+  # for example one created in the GitHub UI before this workflow ran.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, such as 1.1.0
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -13,6 +23,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -20,7 +32,7 @@ jobs:
 
       - name: Require the tag to match manifest.json
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
+          tag="$TAG"
           case "$tag" in
             v*)
               echo "Obsidian release tags have no v prefix (got ${tag})." >&2
@@ -41,8 +53,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title="$tag" \
-            --notes="Oddava Notes ${tag}. Install with BRAT from oddava/obsidian-oddava-notes, or copy main.js, manifest.json, and styles.css into the plugins folder." \
-            main.js manifest.json styles.css
+          tag="$TAG"
+          # A release made in the GitHub UI creates the tag first, so the
+          # release can already exist here. Attach the files to it then.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$tag" \
+              --title="$tag" \
+              --notes="Oddava Notes ${tag}. Install with BRAT from oddava/obsidian-oddava-notes, or copy main.js, manifest.json, and styles.css into the plugins folder." \
+              main.js manifest.json styles.css
+          fi
