@@ -158,7 +158,7 @@ export async function updatePost(
 	if (ids.length > parts.length) {
 		const extra = ids.splice(parts.length);
 		hashes.splice(parts.length);
-		const left = await deleteMessages(env, extra, warnings);
+		const left = await deleteMessages(env, extra, warnings, { messageId: ids[0] as number });
 		deleted = extra.length - left.length;
 	}
 
@@ -184,7 +184,7 @@ export async function replacePost(env: TelegramPostEnv, draft: TelegramPostDraft
 		const warnings = [...fresh.warnings];
 		const partial = fresh.record?.messageIds ?? [];
 		if (partial.length > 0) {
-			const left = await deleteMessages(env, partial, []);
+			const left = await deleteMessages(env, partial, [], old[0] ? { messageId: old[0] } : undefined);
 			if (left.length > 0) {
 				warnings.push(
 					`The new post stopped part-way. Delete ${left.length === 1 ? `message ${left[0]}` : `messages ${left.join(', ')}`} in Telegram; the note still points to the old post.`,
@@ -194,28 +194,80 @@ export async function replacePost(env: TelegramPostEnv, draft: TelegramPostDraft
 		return { ...fresh, record: null, sent: 0, warnings };
 	}
 	const warnings = [...fresh.warnings];
-	const left = await deleteMessages(env, old, warnings);
+	const newFirst = fresh.record?.messageIds[0];
+	const left = await deleteMessages(
+		env,
+		old,
+		warnings,
+		newFirst
+			? { messageId: newFirst, photoIds: draft.existing?.media === 'photo' && old[0] ? [old[0]] : [] }
+			: undefined,
+	);
 	return { ...fresh, deleted: old.length - left.length, warnings };
 }
 
-async function deleteMessages(env: TelegramPostEnv, ids: number[], warnings: string[]): Promise<number[]> {
+/**
+ * Delete messages. Telegram only lets a bot delete its messages for a while;
+ * one it will not delete is edited into a link to `pointTo` instead, so the
+ * channel does not keep showing old text. Returns the ids still showing it.
+ */
+async function deleteMessages(
+	env: TelegramPostEnv,
+	ids: number[],
+	warnings: string[],
+	pointTo?: { messageId: number; photoIds?: number[] },
+): Promise<number[]> {
 	const left: number[] = [];
+	const pointed: number[] = [];
 	let reason = '';
+	const link = pointTo ? telegramMessageLink(env.chatId, pointTo.messageId) : null;
 	for (const messageId of ids) {
 		try {
 			await env.api.deleteMessage({ chatId: env.chatId, messageId });
+			continue;
 		} catch (error) {
-			left.push(messageId);
 			reason ||= errorMessage(error);
 		}
+		if (link && (await pointToPost(env, messageId, link, pointTo?.photoIds?.includes(messageId) === true))) {
+			pointed.push(messageId);
+		} else {
+			left.push(messageId);
+		}
+	}
+	const name = (list: number[]): string => (list.length === 1 ? `message ${list[0]}` : `messages ${list.join(', ')}`);
+	if (pointed.length > 0) {
+		warnings.push(
+			`Telegram would not let the bot delete the old ${name(pointed)}, so ${pointed.length === 1 ? 'it now links' : 'they now link'} to the current post. Delete ${pointed.length === 1 ? 'it' : 'them'} in Telegram if you like.`,
+		);
 	}
 	if (left.length > 0) {
-		const which = left.length === 1 ? `message ${left[0]}` : `messages ${left.join(', ')}`;
 		warnings.push(
-			`Could not delete the old ${which}. Delete ${left.length === 1 ? 'it' : 'them'} in Telegram. ${reason}`.trim(),
+			`Could not delete the old ${name(left)}. Delete ${left.length === 1 ? 'it' : 'them'} in Telegram. ${reason}`.trim(),
 		);
 	}
 	return left;
+}
+
+const POINTER_TEXT = 'This post was updated. Read the current version.';
+
+async function pointToPost(env: TelegramPostEnv, messageId: number, link: string, photo: boolean): Promise<boolean> {
+	const html = `<a href="${link}">${POINTER_TEXT}</a>`;
+	try {
+		if (photo) await env.api.editMessageCaption({ chatId: env.chatId, messageId, captionHtml: html });
+		else await env.api.editMessageText({ chatId: env.chatId, messageId, html, linkPreview: { is_disabled: true } });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** `https://t.me/<channel>/<id>`, or the `t.me/c/` form for a numeric id. */
+export function telegramMessageLink(chatId: string, messageId: number): string | null {
+	const trimmed = chatId.trim();
+	if (trimmed.startsWith('@')) return `https://t.me/${trimmed.slice(1)}/${messageId}`;
+	const internal = trimmed.match(/^-100(\d+)$/);
+	if (internal) return `https://t.me/c/${internal[1]}/${messageId}`;
+	return null;
 }
 
 async function sendPart(

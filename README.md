@@ -133,7 +133,7 @@ Vault images are uploaded. `https://` images are fetched by Telegram. If Telegra
 
 ### Link preview
 
-Telegram can show the page's preview card (title, image, and description from the site) under or over the post. **Link preview** picks the size and the position, or turns it off. `telegram_preview: off` (or `small-above`, `large-below`, and so on) overrides it for one note. The card goes on the last message, the one with the link. It is left off when a cover photo is sent, so the post does not show the same picture twice.
+Telegram can show the page's preview card (title, image, and description from the site) under or over the post. **Link preview** picks the size and the position, or turns it off. `telegram_preview: off` (or `small-above`, `large-below`, and so on) overrides it for one note. The card goes on the first message, so it heads the post and stays put when the post grows or shrinks. It is left off when a cover photo is sent, so the post does not show the same picture twice.
 
 ### Updating a post
 
@@ -145,7 +145,9 @@ The post's message ids are stored in the note: `telegram_message_id` (the first 
 - **Replace post.** Sends the post again, in order, then deletes the old messages. Use it when the note grew a lot, or to add or remove the cover photo: Telegram cannot turn a text message into a photo, or back, so Update keeps a text post as text. If the new post stops part-way, the messages that went out are deleted again and the note keeps pointing to the old post.
 - **Post new.** Sends a new post and leaves the old one alone.
 
-If Telegram cannot delete an old message (bots can only delete their messages for a limited time), the notice tells you which message to delete by hand. If a message of the post was deleted in Telegram, Update says so; use Replace or Post new.
+If Telegram will not let the bot delete an old message (bots can only delete their messages for a limited time), that message is edited into a link to the current post instead, and the notice names it so you can delete it by hand. If a message of the post was deleted in Telegram, Update says so; use Replace or Post new.
+
+Links to other notes do not count as an edit. Whether `[[other note]]` becomes a link depends on whether this device knows that note is published, and two devices that disagree would otherwise take turns rewriting the post. A link appears the next time the post is edited for another reason, or on Replace.
 
 ### Posting on publish
 

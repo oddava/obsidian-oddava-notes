@@ -22,6 +22,11 @@ export interface Mark {
 	lang?: string;
 	/** Collapsed quote, for `blockquote`. */
 	expandable?: boolean;
+	/**
+	 * A link to another note's page. Whether it resolves depends on what this
+	 * device knows is published, so it is left out of change detection.
+	 */
+	internal?: boolean;
 }
 
 export interface Run {
@@ -43,6 +48,8 @@ export interface RenderedText {
 	plain: string;
 	/** UTF-16 length after entity parsing, the number Telegram limits. */
 	length: number;
+	/** The HTML with links to other notes as plain text. Hashed to spot edits. */
+	stableHtml: string;
 }
 
 export interface FormatContext {
@@ -511,7 +518,8 @@ export function parseInline(text: string, context: FormatContext = {}, marks: Ma
 
 		if (char === '`') {
 			const ticks = rest.match(/^`+/)?.[0] ?? '`';
-			const close = text.indexOf(ticks, i + ticks.length);
+			const found = text.indexOf(ticks, i + ticks.length);
+			const close = found > i && found - i <= SEARCH_LIMIT ? found : -1;
 			if (close > i) {
 				let code = text.slice(i + ticks.length, close);
 				if (code.startsWith(' ') && code.endsWith(' ') && code.trim()) code = code.slice(1, -1);
@@ -533,7 +541,7 @@ export function parseInline(text: string, context: FormatContext = {}, marks: Ma
 				if (!IMAGE_EXTENSIONS.test(target.split('#')[0] ?? '') && !/\.(pdf|mp[34]|mov|webm|wav|ogg|m4a)$/i.test(target)) {
 					const url = context.resolveNote?.(target) ?? null;
 					const label = wikiLabel(inner);
-					if (url && label) push([{ text: label, marks: [...marks, { type: 'a', href: url }] }]);
+					if (url && label) push([{ text: label, marks: [...marks, { type: 'a', href: url, internal: true }] }]);
 				}
 				i = close + 2;
 				continue;
@@ -550,7 +558,7 @@ export function parseInline(text: string, context: FormatContext = {}, marks: Ma
 				if (label) {
 					push(
 						url
-							? parseInline(label, context, [...marks, { type: 'a', href: url }])
+							? parseInline(label, context, [...marks, { type: 'a', href: url, internal: true }])
 							: parseInline(label, context, marks),
 					);
 				}
@@ -576,8 +584,12 @@ export function parseInline(text: string, context: FormatContext = {}, marks: Ma
 			}
 			const link = matchLink(text, i);
 			if (link) {
-				const href = resolveHref(link.href, context);
-				const inner = parseInline(link.label, context, href ? [...marks, { type: 'a', href }] : marks);
+				const resolved = resolveHref(link.href, context);
+				const inner = parseInline(
+					link.label,
+					context,
+					resolved ? [...marks, { type: 'a', href: resolved.href, internal: resolved.internal || undefined }] : marks,
+				);
 				push(inner);
 				i = link.end;
 				continue;
@@ -686,6 +698,8 @@ function matchDelimiter(
 		{ open: '*', marks: ['i'] },
 		{ open: '_', marks: ['i'] },
 	];
+	const triple = mixedTriple(text, start);
+	if (triple) return triple;
 	for (const candidate of candidates) {
 		const { open } = candidate;
 		if (!text.startsWith(open, start)) continue;
@@ -699,6 +713,41 @@ function matchDelimiter(
 		return { open, close, marks: candidate.marks };
 	}
 	return null;
+}
+
+/**
+ * `***a** b*` and `***a* b**`: three markers that close as two and one.
+ * Whichever closes first is the inner span; the outer one wraps it.
+ */
+function mixedTriple(
+	text: string,
+	start: number,
+): { open: string; close: number; marks: MarkType[] } | null {
+	const char = text.charAt(start);
+	if ((char !== '*' && char !== '_') || !text.startsWith(char.repeat(3), start)) return null;
+	if (text.charAt(start + 3) === char || /\s/.test(text.charAt(start + 3) || ' ')) return null;
+	if (char === '_' && /[A-Za-z0-9]/.test(text.charAt(start - 1))) return null;
+	if (findCloser(text, start + 3, char.repeat(3)) >= 0) return null;
+	const double = findCloser(text, start + 3, char.repeat(2));
+	const single = findCloser(text, start + 3, char);
+	if (double >= 0 && (single < 0 || double < single)) {
+		const close = findCloser(text, double + 2, char);
+		return close >= 0 ? { open: char, close, marks: ['i'] } : null;
+	}
+	if (single >= 0) {
+		const close = findCloser(text, single + 1, char.repeat(2));
+		return close >= 0 ? { open: char.repeat(2), close, marks: ['b'] } : null;
+	}
+	return null;
+}
+
+/** Single markers in `text` that are not part of a pair: `*a **b**` has one. */
+function oddSingles(text: string, char: string): boolean {
+	let odd = false;
+	for (const run of text.match(new RegExp(`\\${char}+`, 'g')) ?? []) {
+		if (run.length % 2 === 1) odd = !odd;
+	}
+	return odd;
 }
 
 /**
@@ -743,6 +792,10 @@ function findCloser(text: string, from: number, delimiter: string): number {
 				}
 			}
 			if (i > from && !/\s/.test(before) && !(delimiter.startsWith('_') && /[A-Za-z0-9]/.test(after))) {
+				// `**a *b***`: the italic inside closes first, then the bold.
+				if (delimiter.length === 2 && text.charAt(i + 2) === char && text.charAt(i + 3) !== char) {
+					if (oddSingles(text.slice(from, i), char)) return i + 1;
+				}
 				return i;
 			}
 		}
@@ -819,10 +872,13 @@ function matchLink(text: string, start: number): { label: string; href: string; 
 	return { label: text.slice(start + 1, labelEnd), href, end: hrefEnd + 1 };
 }
 
-function resolveHref(raw: string, context: FormatContext): string | null {
+function resolveHref(raw: string, context: FormatContext): { href: string; internal: boolean } | null {
 	const href = raw.trim();
 	if (!href) return null;
-	if (/^(https?|tg):\/\//i.test(href)) return safeUrl(href);
+	if (/^(https?|tg):\/\//i.test(href)) {
+		const safe = safeUrl(href);
+		return safe ? { href: safe, internal: false } : null;
+	}
 	if (href.startsWith('#')) return null;
 	if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
 	let target = href;
@@ -831,7 +887,8 @@ function resolveHref(raw: string, context: FormatContext): string | null {
 	} catch {
 		// Keep the raw text.
 	}
-	return context.resolveNote?.(target) ?? null;
+	const url = context.resolveNote?.(target) ?? null;
+	return url ? { href: url, internal: true } : null;
 }
 
 function safeUrl(url: string): string | null {
@@ -900,7 +957,8 @@ function sameMark(left: Mark, right: Mark): boolean {
 		left.type === right.type &&
 		left.href === right.href &&
 		left.lang === right.lang &&
-		Boolean(left.expandable) === Boolean(right.expandable)
+		Boolean(left.expandable) === Boolean(right.expandable) &&
+		Boolean(left.internal) === Boolean(right.internal)
 	);
 }
 
@@ -1032,11 +1090,15 @@ export function runsToHtml(runs: Run[]): string {
 
 export function renderRuns(runs: Run[]): RenderedText {
 	const merged = mergeRuns(runs);
+	const stable = mergeRuns(
+		merged.map((run) => ({ text: run.text, marks: run.marks.filter((mark) => !mark.internal) })),
+	);
 	return {
 		runs: merged,
 		html: runsToHtml(merged),
 		plain: runsToPlain(merged),
 		length: visibleLength(merged),
+		stableHtml: runsToHtml(stable),
 	};
 }
 

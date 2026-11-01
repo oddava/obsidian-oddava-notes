@@ -8,7 +8,7 @@ import {
 	normalizeTelegramChannel,
 	TelegramApiError,
 } from './telegram-api';
-import { replacePost, sendNewPost, updatePost, type TelegramPostEnv } from './telegram-post';
+import { replacePost, sendNewPost, telegramMessageLink, updatePost, type TelegramPostEnv } from './telegram-post';
 
 const token = '123456789:AA-real-token_ok';
 const long = 'i will keep notes about the stuff i am learning, ideas worth remembering later. ';
@@ -151,6 +151,11 @@ describe('telegram API client', () => {
 		await expect(api.sendMessage({ chatId: '@justoddava', html: 'x' })).rejects.toThrow(/\[redacted\]/);
 	});
 
+	it('links to a channel message by username or by numeric id', () => {
+		expect(telegramMessageLink('@justoddava', 7)).toBe('https://t.me/justoddava/7');
+		expect(telegramMessageLink('-1001234567890', 7)).toBe('https://t.me/c/1234567890/7');
+	});
+
 	it('accepts t.me links as channels', () => {
 		expect(normalizeTelegramChannel('https://t.me/justoddava')).toBe('@justoddava');
 		expect(normalizeTelegramChannel('-1001234567890')).toBe('-1001234567890');
@@ -169,7 +174,8 @@ describe('posting a note', () => {
 		expect(channel).toHaveLength(draft.parts.length);
 		expect(channel.map((message) => message.silent)).toEqual(channel.map((_, index) => index > 0));
 		expect(channel.every((message) => message.parseMode === 'HTML')).toBe(true);
-		expect(channel.at(-1)?.linkPreview).toMatchObject({ url: 'https://oddava.me/notes/knowledge' });
+		expect(channel[0]?.linkPreview).toMatchObject({ url: 'https://oddava.me/notes/knowledge' });
+		expect(channel.slice(1).every((message) => message.linkPreview?.is_disabled === true)).toBe(true);
 		expect(result.record).toEqual({
 			messageIds: channel.map((message) => message.id),
 			hashes: draft.parts.map((part) => part.hash),
@@ -385,6 +391,17 @@ describe('replacing a post', () => {
 		telegram.fail('deleteMessage', "Bad Request: message can't be deleted for everyone");
 		const replaced = await replacePost(env(telegram), next(stamped));
 		expect(replaced.ok).toBe(true);
-		expect(replaced.warnings.join(' ')).toMatch(/Could not delete the old message 100/);
+		expect(replaced.warnings.join(' ')).toMatch(/would not let the bot delete the old message 100, so it now links/);
+		const newFirst = replaced.record?.messageIds[0];
+		expect(telegram.messages.get(100)?.text).toBe(
+			`<a href="https://t.me/justoddava/${newFirst}">This post was updated. Read the current version.</a>`,
+		);
+
+		// If even the edit is refused, say which message to delete by hand.
+		const stuck = withTelegramRecord(content, replaced.record ?? { messageIds: [], hashes: [] });
+		telegram.fail('deleteMessage', "Bad Request: message can't be deleted for everyone");
+		telegram.fail('editMessageText', "Bad Request: message can't be edited");
+		const again = await replacePost(env(telegram), prepare(stuck));
+		expect(again.warnings.join(' ')).toMatch(new RegExp(`Could not delete the old message ${newFirst}`));
 	});
 });

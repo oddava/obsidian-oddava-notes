@@ -56,6 +56,15 @@ describe('inline Markdown', () => {
 		expect(html('[js](javascript:alert(1))')).toBe('js');
 	});
 
+	it('reads bold and italic that close in either order', () => {
+		expect(html('**a *b***')).toBe('<b>a <i>b</i></b>');
+		expect(html('***a** b*')).toBe('<b><i>a</i></b><i> b</i>');
+		expect(html('*a **b***')).toBe('<i>a </i><b><i>b</i></b>');
+		expect(html('***a* b**')).toBe('<b><i>a</i> b</b>');
+		expect(html('***both***')).toBe('<b><i>both</i></b>');
+		expect(html('__a _b___')).toBe('<b>a <i>b</i></b>');
+	});
+
 	it('never nests formatting inside code', () => {
 		const runs = parseInline('**bold `code` bold**');
 		expect(runsToHtml(runs)).toBe('<b>bold </b><code>code</code><b> bold</b>');

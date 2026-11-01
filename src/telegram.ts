@@ -87,7 +87,9 @@ export interface TelegramPart {
 	linkPreview?: LinkPreviewOptions;
 	/**
 	 * What was sent, for deciding whether an edit is needed. A photo part's
-	 * hash is the cover's fingerprint followed by the caption's.
+	 * hash is the cover's fingerprint followed by the caption's. Links to
+	 * other notes are left out: two devices can disagree about which notes
+	 * are published, and must not take turns rewriting the post.
 	 */
 	hash: string;
 }
@@ -347,8 +349,9 @@ function footerBlock(url: string): Block {
  * Split blocks into messages and attach the photo and link preview.
  * With a cover, the first message is the photo and its caption holds as much
  * of the post as 1024 characters allow. The page's link preview goes on the
- * last text message, the one with the link. It is left off when a cover photo
- * is sent, so the post does not show the same picture twice.
+ * first message, so it heads the post and stays put when the post grows or
+ * shrinks. It is left off when a cover photo is sent, so the post does not
+ * show the same picture twice.
  */
 export function buildParts(
 	blocks: Block[],
@@ -363,13 +366,14 @@ export function buildParts(
 	messages.forEach((runs, index) => {
 		const text = renderRuns(runs);
 		if (index === 0 && cover) {
-			parts.push({ kind: 'photo', text, hash: coverFingerprint(cover) + contentFingerprint(text.html) });
+			parts.push({ kind: 'photo', text, hash: coverFingerprint(cover) + contentFingerprint(text.stableHtml) });
 			return;
 		}
-		const last = index === messages.length - 1;
+		// The card rides on the first message. It never moves when the post
+		// grows or shrinks, so no edit has to change only the preview.
 		const preview: LinkPreviewOptions =
-			last && !cover ? linkPreviewOptions(linkPreview, url) : { is_disabled: true };
-		parts.push({ kind: 'text', text, linkPreview: preview, hash: textFingerprint(text.html, preview) });
+			index === 0 && !cover ? linkPreviewOptions(linkPreview, url) : { is_disabled: true };
+		parts.push({ kind: 'text', text, linkPreview: preview, hash: textFingerprint(text.stableHtml, preview) });
 	});
 	if (parts.length === 0 && cover) {
 		const text = renderRuns([]);

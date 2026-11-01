@@ -98,14 +98,14 @@ describe('telegram post text', () => {
 		});
 	});
 
-	it('splits a long note into several messages and puts the preview on the last', () => {
+	it('splits a long note into several messages and puts the preview on the first', () => {
 		const paragraphs = Array.from({ length: 30 }, (_, index) => `Paragraph ${index}. ${long.repeat(3)}`);
 		const draft = prepare(`# Long\n\n${paragraphs.join('\n\n')}\n`);
 		expect(draft.parts.length).toBeGreaterThan(1);
 		for (const part of draft.parts) expect(part.text.length).toBeLessThanOrEqual(TELEGRAM_TEXT_LIMIT);
 		const previews = draft.parts.map((part) => part.linkPreview);
-		expect(previews.slice(0, -1).every((preview) => preview?.is_disabled === true)).toBe(true);
-		expect(previews.at(-1)?.url).toBe('https://oddava.me/notes/knowledge');
+		expect(previews[0]?.url).toBe('https://oddava.me/notes/knowledge');
+		expect(previews.slice(1).every((preview) => preview?.is_disabled === true)).toBe(true);
 		expect(draft.parts.at(-1)?.text.plain.endsWith('Read on oddava.me')).toBe(true);
 		expect(draft.parts.map((part) => part.text.plain).join('\n\n')).toContain('Paragraph 29.');
 	});
@@ -172,6 +172,19 @@ describe('telegram post text', () => {
 		expect(draft.warnings.join(' ')).toMatch(/new one/);
 		expect(draft.change).toEqual({ kind: 'same', changed: [0] });
 		expect(draft.unchanged).toBe(false);
+	});
+});
+
+describe('links to other notes', () => {
+	it('do not count as an edit, so devices that disagree do not rewrite the post', () => {
+		const content = `# Hello\n\nSee [[other]] and [site](https://example.com).\n`;
+		const linked = prepare(content, { resolveNote: () => 'https://oddava.me/notes/other' });
+		const plain = prepare(content);
+		expect(linked.parts[0]?.text.html).toContain('<a href="https://oddava.me/notes/other">other</a>');
+		expect(plain.parts[0]?.text.html).not.toContain('notes/other"');
+		expect(linked.parts[0]?.hash).toBe(plain.parts[0]?.hash);
+		const otherHref = prepare(content.replace('example.com', 'example.org'));
+		expect(otherHref.parts[0]?.hash).not.toBe(plain.parts[0]?.hash);
 	});
 });
 
