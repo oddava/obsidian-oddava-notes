@@ -5,8 +5,9 @@ on:
     tags:
       # Obsidian plugin tags have no v prefix: 1.0.0, not v1.0.0.
       - '[0-9]*.[0-9]*.[0-9]*'
-  # Run it by hand to attach the files to a release that already exists,
-  # for example one created in the GitHub UI before this workflow ran.
+  # Run it by hand with a tag. If the tag exists (for example, a release
+  # made in the GitHub UI), its files are attached to that release. If not,
+  # the release and the tag are created on the commit the run is for.
   workflow_dispatch:
     inputs:
       tag:
@@ -24,7 +25,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Build the tagged commit when the tag exists
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            git checkout -q "refs/tags/$TAG"
+          fi
+          echo "Releasing $(git rev-parse --short HEAD) as $TAG"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -60,6 +69,7 @@ jobs:
             gh release upload "$tag" main.js manifest.json styles.css --clobber
           else
             gh release create "$tag" \
+              --target="$(git rev-parse HEAD)" \
               --title="$tag" \
               --notes="Oddava Notes ${tag}. Install with BRAT from oddava/obsidian-oddava-notes, or copy main.js, manifest.json, and styles.css into the plugins folder." \
               main.js manifest.json styles.css
