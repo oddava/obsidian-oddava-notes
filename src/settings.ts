@@ -271,10 +271,32 @@ export class OddavaSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Post silently')
-			.setDesc('Subscribers get the post without a notification sound. Later messages of a long post are always silent.')
+			.setDesc('Subscribers get the post without a notification sound. telegram_silent: true or false in a note overrides this. Later messages of a long post are always silent.')
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.telegramSilent).onChange(async (value) => {
 					this.plugin.settings.telegramSilent = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Pin posts by default')
+			.setDesc(
+				'Pins the first message after sending it, without a notification. The bot needs the "Pin messages" admin right. telegram_pin: true or false in a note overrides this. Editing a post never pins it again.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.telegramPin).onChange(async (value) => {
+					this.plugin.settings.telegramPin = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Show reading time and tags')
+			.setDesc('Adds a line like "⏱ 3 min read · #obsidian #notes" above the link to the page.')
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.telegramMeta).onChange(async (value) => {
+					this.plugin.settings.telegramMeta = value;
 					await this.plugin.saveSettings();
 				}),
 			);

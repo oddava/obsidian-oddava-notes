@@ -1355,6 +1355,9 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			fingerprint: compareWithSite ? this.publishedFingerprint(file.path) : undefined,
 			format: this.settings.telegramFormat,
 			linkPreview: this.settings.telegramLinkPreview,
+			silent: this.settings.telegramSilent,
+			pin: this.settings.telegramPin,
+			showMeta: this.settings.telegramMeta,
 			cover: cover.cover,
 			coverWarnings: cover.warnings,
 			resolveNote: (target) => this.publicUrlForLink(target, file.path),
@@ -1472,7 +1475,8 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			const env: TelegramPostEnv = {
 				api: createTelegramApi(this.http, this.settings.telegramBotToken),
 				chatId: draft.channel,
-				silent: this.settings.telegramSilent,
+				silent: draft.silent,
+				pin: draft.pin,
 				loadPhoto: (cover) => this.loadTelegramPhoto(cover),
 			};
 			const outcome =

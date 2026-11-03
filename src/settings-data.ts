@@ -53,6 +53,10 @@ export interface OddavaSettings {
 	telegramCoverImage: boolean;
 	/** Post without a notification sound. */
 	telegramSilent: boolean;
+	/** Pin new posts. `telegram_pin` in a note wins. */
+	telegramPin: boolean;
+	/** Reading time and tags above the link. */
+	telegramMeta: boolean;
 	/**
 	 * What to do on the site when a synced note leaves the vault.
 	 * Deletes on the site are soft: the note goes to the trash and can be restored.
@@ -76,6 +80,8 @@ export function defaultSettings(): OddavaSettings {
 		telegramLinkPreview: 'large-below',
 		telegramCoverImage: true,
 		telegramSilent: false,
+		telegramPin: false,
+		telegramMeta: true,
 		siteDelete: 'ask',
 	};
 }
@@ -107,6 +113,8 @@ export function mergeSettings(stored: unknown): OddavaSettings {
 		telegramCoverImage:
 			typeof stored.telegramCoverImage === 'boolean' ? stored.telegramCoverImage : defaults.telegramCoverImage,
 		telegramSilent: stored.telegramSilent === true,
+		telegramPin: stored.telegramPin === true,
+		telegramMeta: typeof stored.telegramMeta === 'boolean' ? stored.telegramMeta : defaults.telegramMeta,
 		siteDelete: siteDeleteSetting(stored.siteDelete),
 	};
 }

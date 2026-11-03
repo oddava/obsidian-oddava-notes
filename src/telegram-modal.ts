@@ -45,6 +45,8 @@ export class TelegramPostModal extends Modal {
 			describeParts(draft.parts),
 			TELEGRAM_FORMATS[draft.format],
 		];
+		facts.push(draft.silent ? 'Silent' : 'With notification');
+		facts.push(draft.pin ? 'Will be pinned (new posts only)' : 'Not pinned');
 		if (!draft.cover) facts.push(TELEGRAM_LINK_PREVIEWS[draft.linkPreview]);
 		contentEl.createEl('p', { text: facts.join(' · '), cls: 'oddava-notes-telegram-facts' });
 

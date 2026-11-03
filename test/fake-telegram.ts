@@ -24,6 +24,7 @@ export interface FakeCall {
 export class FakeTelegram {
 	readonly messages = new Map<number, FakeMessage>();
 	readonly calls: FakeCall[] = [];
+	readonly pins: Array<{ id: number; silent: boolean }> = [];
 	private nextId = 100;
 	private failures: Array<{
 		method: string;
@@ -142,6 +143,12 @@ export class FakeTelegram {
 				message.photo = photo;
 				if (preview) message.linkPreview = preview;
 				return reply(200, { ok: true, result: { message_id: message.id } });
+			}
+			case 'pinChatMessage': {
+				const id = Number(payload.message_id);
+				if (!this.messages.has(id)) return reply(400, { ok: false, description: 'Bad Request: message to pin not found' });
+				this.pins.push({ id, silent: payload.disable_notification === true });
+				return reply(200, { ok: true, result: true });
 			}
 			case 'deleteMessage': {
 				const id = Number(payload.message_id);

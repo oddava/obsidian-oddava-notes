@@ -1,6 +1,7 @@
 import { normalizeBaseUrl } from './api';
 import { contentFingerprint } from './fingerprint';
 import {
+	readFrontmatterList,
 	readFrontmatterScalar,
 	readTelegramFrontmatter,
 	splitFrontmatter,
@@ -123,6 +124,10 @@ export interface TelegramPostDraft {
 	channel: string;
 	format: TelegramFormat;
 	linkPreview: TelegramLinkPreview;
+	/** Send without a notification sound. */
+	silent: boolean;
+	/** Pin the first message after a new send. Edits never pin. */
+	pin: boolean;
 	parts: TelegramPart[];
 	/** The same post without the cover photo, for when Telegram refuses the image. */
 	textOnly: TelegramPart[] | null;
@@ -222,6 +227,12 @@ export interface PrepareTelegramInput {
 	format?: TelegramFormat;
 	/** Setting. `telegram_preview` in the note wins. */
 	linkPreview?: TelegramLinkPreview;
+	/** Setting. `telegram_silent` in the note wins. */
+	silent?: boolean;
+	/** Setting. `telegram_pin` in the note wins. */
+	pin?: boolean;
+	/** Add the reading time and tags line. Off when not given. */
+	showMeta?: boolean;
 	/** Resolved cover photo, if any. */
 	cover?: TelegramCover | null;
 	/** Problems found while resolving the cover. */
@@ -254,12 +265,15 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 	const meta = readTelegramFrontmatter(input.content);
 	const format = telegramFormat(meta.format) ?? input.format ?? 'full';
 	const linkPreview = telegramLinkPreview(meta.preview) ?? input.linkPreview ?? 'large-below';
+	const silent = meta.silent ?? input.silent ?? false;
+	const pin = meta.pin ?? input.pin ?? false;
+	const metaText = input.showMeta ? metaLine(input.content) : null;
 	const cover = input.cover ?? undefined;
 	const { title } = noteTitleAndExcerpt(input.content, mapped.apiPath);
 	const blocks =
 		format === 'full'
-			? fullBlocks(input.content, title, url, { resolveNote: input.resolveNote })
-			: summaryBlocks(input.content, title, url, { resolveNote: input.resolveNote });
+			? fullBlocks(input.content, title, url, { resolveNote: input.resolveNote }, metaText)
+			: summaryBlocks(input.content, title, url, { resolveNote: input.resolveNote }, metaText);
 
 	const parts = buildParts(blocks, cover, url, linkPreview);
 	const textOnly = cover ? buildParts(blocks, undefined, url, linkPreview) : null;
@@ -309,6 +323,8 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 			channel,
 			format,
 			linkPreview,
+			silent,
+			pin,
 			parts,
 			textOnly,
 			updateParts,
@@ -322,12 +338,18 @@ export function prepareTelegramPost(input: PrepareTelegramInput): TelegramPrepar
 }
 
 /** Title in bold, the whole note, then a link to the page. */
-export function fullBlocks(content: string, title: string, url: string, context: FormatContext = {}): Block[] {
+export function fullBlocks(
+	content: string,
+	title: string,
+	url: string,
+	context: FormatContext = {},
+	meta: string | null = null,
+): Block[] {
 	const { body } = splitFrontmatter(content);
 	const blocks = markdownToBlocks(body, context);
 	const first = blocks[0];
 	if (first?.kind === 'heading' && sameText(runsToPlain(first.runs), title)) blocks.shift();
-	return [titleBlock(title), ...blocks, footerBlock(url)];
+	return [titleBlock(title), ...blocks, ...metaBlocks(meta), footerBlock(url)];
 }
 
 /**
@@ -336,7 +358,13 @@ export function fullBlocks(content: string, title: string, url: string, context:
  * is not a summary), and the last one is cut short if it runs long. Lists
  * stay lists. Code, tables, and rules are left for the page.
  */
-export function summaryBlocks(content: string, title: string, url: string, context: FormatContext = {}): Block[] {
+export function summaryBlocks(
+	content: string,
+	title: string,
+	url: string,
+	context: FormatContext = {},
+	meta: string | null = null,
+): Block[] {
 	const { body } = splitFrontmatter(content);
 	const source = markdownToBlocks(body, context);
 	const first = source[0];
@@ -360,7 +388,59 @@ export function summaryBlocks(content: string, title: string, url: string, conte
 	}
 	// A heading with nothing after it says nothing.
 	while (picked[picked.length - 1]?.kind === 'heading') picked.pop();
-	return [titleBlock(title), ...picked, footerBlock(url)];
+	return [titleBlock(title), ...picked, ...metaBlocks(meta), footerBlock(url)];
+}
+
+/** Words per minute for the reading time. */
+export const WORDS_PER_MINUTE = 200;
+
+/** Whole minutes to read the note body: frontmatter left out, code counted, at least 1. */
+export function readingMinutes(content: string): number {
+	const words = splitFrontmatter(content).body.split(/\s+/).filter(Boolean).length;
+	return Math.max(1, Math.ceil(words / WORDS_PER_MINUTE));
+}
+
+/** Letters, digits and `_` only. `/` and `-` become `_`. Null when nothing useful is left. */
+export function sanitizeTag(value: string): string | null {
+	const tag = value
+		.trim()
+		.replace(/^#+/, '')
+		.replace(/[/-]/g, '_')
+		.replace(/[^\p{L}\p{N}_]/gu, '');
+	if (!tag || /^\d+$/.test(tag)) return null;
+	return tag;
+}
+
+/** Tags from the frontmatter `tags`, then inline `#tags`, cleaned and without repeats. */
+export function collectTags(content: string): string[] {
+	const { raw, body } = splitFrontmatter(content);
+	const found: string[] = raw === null ? [] : readFrontmatterList(raw, 'tags');
+	const prose = body
+		.replace(/(^|\n)[ \t]*(`{3,}|~{3,})[\s\S]*?(?:\n[ \t]*\2[^\n]*|$)/g, '\n')
+		.replace(/`[^`\n]*`/g, '')
+		.replace(/%%[\s\S]*?%%/g, '');
+	for (const match of prose.matchAll(/(?:^|[\s(])#([\p{L}\p{N}_/-]+)/gu)) found.push(match[1] ?? '');
+	const seen = new Set<string>();
+	const tags: string[] = [];
+	for (const item of found) {
+		const tag = sanitizeTag(item);
+		if (!tag || seen.has(tag.toLowerCase())) continue;
+		seen.add(tag.toLowerCase());
+		tags.push(tag);
+	}
+	return tags;
+}
+
+/** `⏱ 3 min read · #obsidian #notes`, or just the reading time for an untagged note. */
+export function metaLine(content: string): string {
+	const tags = collectTags(content);
+	const time = `⏱ ${readingMinutes(content)} min read`;
+	return tags.length > 0 ? `${time} · ${tags.map((tag) => `#${tag}`).join(' ')}` : time;
+}
+
+/** Plain text run: rendering escapes it, and packing counts it toward the limit. */
+function metaBlocks(meta: string | null): Block[] {
+	return meta ? [{ kind: 'paragraph', runs: [{ text: meta, marks: [] }] }] : [];
 }
 
 function titleBlock(title: string): Block {

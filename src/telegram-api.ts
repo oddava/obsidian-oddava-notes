@@ -227,6 +227,15 @@ export function createTelegramApi(http: HttpClient, token: string, options: Tele
 			);
 		},
 
+		/** Pins a message. Always silent, so the channel gets no second notification. */
+		async pinChatMessage(input: { chatId: string; messageId: number }): Promise<void> {
+			await call('pinChatMessage', {
+				chat_id: chat(input.chatId),
+				message_id: input.messageId,
+				disable_notification: true,
+			});
+		},
+
 		async editMessageText(input: {
 			chatId: string;
 			messageId: number;

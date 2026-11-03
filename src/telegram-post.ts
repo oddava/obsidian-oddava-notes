@@ -23,11 +23,13 @@ import {
 export interface TelegramPostEnv {
 	api: Pick<
 		TelegramApi,
-		'sendMessage' | 'sendPhoto' | 'editMessageText' | 'editMessageCaption' | 'editMessageMedia' | 'deleteMessage'
+		'sendMessage' | 'sendPhoto' | 'pinChatMessage' | 'editMessageText' | 'editMessageCaption' | 'editMessageMedia' | 'deleteMessage'
 	>;
 	chatId: string;
 	/** Send without a notification sound. Messages after the first are always silent. */
 	silent: boolean;
+	/** Pin the first message of a new post. Never used by edits. */
+	pin?: boolean;
 	loadPhoto: (cover: TelegramCover) => Promise<TelegramPhotoInput>;
 }
 
@@ -42,6 +44,8 @@ export interface TelegramPostResult {
 	unchanged: boolean;
 	/** The cover photo was refused and the post went out as text. */
 	droppedPhoto: boolean;
+	/** The first message was pinned. */
+	pinned?: boolean;
 	error?: Error;
 	warnings: string[];
 }
@@ -67,6 +71,7 @@ export async function sendNewPost(env: TelegramPostEnv, draft: TelegramPostDraft
 	let droppedPhoto = false;
 	const ids: number[] = [];
 	const hashes: string[] = [];
+	let pinned = false;
 	const record = (): TelegramRecord | null =>
 		ids.length > 0
 			? { messageIds: [...ids], hashes: [...hashes], media: parts[0]?.kind === 'photo' ? 'photo' : undefined }
@@ -82,6 +87,9 @@ export async function sendNewPost(env: TelegramPostEnv, draft: TelegramPostDraft
 			});
 			ids.push(id);
 			hashes.push(part.hash);
+			// Pinned once, right after the first message, so a post that stops
+			// part-way is still pinned. A failure is reported, not retried.
+			if (index === 0 && env.pin) pinned = await pinFirst(env, id, warnings);
 		} catch (error) {
 			if (index === 0 && part.kind === 'photo' && isPhotoProblem(error) && draft.textOnly) {
 				warnings.push(`${errorMessage(error)} Posted without the cover image.`);
@@ -90,10 +98,28 @@ export async function sendNewPost(env: TelegramPostEnv, draft: TelegramPostDraft
 				index = -1;
 				continue;
 			}
-			return result({ record: record(), sent: ids.length, droppedPhoto, error: asError(error), warnings });
+			return result({ record: record(), sent: ids.length, droppedPhoto, pinned, error: asError(error), warnings });
 		}
 	}
-	return result({ ok: true, record: record(), sent: ids.length, droppedPhoto, warnings });
+	return result({ ok: true, record: record(), sent: ids.length, droppedPhoto, pinned, warnings });
+}
+
+/** One attempt. The post already went out, so a failure only adds a warning. */
+async function pinFirst(env: TelegramPostEnv, messageId: number, warnings: string[]): Promise<boolean> {
+	try {
+		await env.api.pinChatMessage({ chatId: env.chatId, messageId });
+		return true;
+	} catch (error) {
+		// Prefer Telegram's own description (e.g. "not enough rights to pin a message")
+		// over the generic wording, which talks about posting rather than pinning.
+		const description =
+			error instanceof TelegramApiError ? error.description.replace(/^Bad Request:\s*/i, '').trim() : '';
+		const reason = description ? `Telegram said: ${description}.` : errorMessage(error);
+		warnings.push(
+			`The post was sent, but it could not be pinned. ${reason ? `${reason} ` : ''}Give the bot the "Pin messages" admin right in the channel, or pin it by hand.`,
+		);
+		return false;
+	}
 }
 
 /**
