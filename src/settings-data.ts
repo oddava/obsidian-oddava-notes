@@ -6,6 +6,7 @@ import {
 	type TelegramFormat,
 	type TelegramLinkPreview,
 } from './telegram';
+import type { DigestRecord } from './telegram-digest';
 import { siteDeleteSetting, type SiteDeleteSetting } from './vault-sync';
 
 /** Floor so a pull cannot loop inside the site's 120 requests/minute limit. */
@@ -57,6 +58,10 @@ export interface OddavaSettings {
 	telegramPin: boolean;
 	/** Reading time and tags above the link. */
 	telegramMeta: boolean;
+	/** Leave notes under `diary/` out of the weekly digest. */
+	telegramDigestExcludeDiary: boolean;
+	/** When the last weekly digest went out, and its message. Null before the first. */
+	lastDigest: DigestRecord | null;
 	/**
 	 * What to do on the site when a synced note leaves the vault.
 	 * Deletes on the site are soft: the note goes to the trash and can be restored.
@@ -82,6 +87,8 @@ export function defaultSettings(): OddavaSettings {
 		telegramSilent: false,
 		telegramPin: false,
 		telegramMeta: true,
+		telegramDigestExcludeDiary: true,
+		lastDigest: null,
 		siteDelete: 'ask',
 	};
 }
@@ -115,8 +122,21 @@ export function mergeSettings(stored: unknown): OddavaSettings {
 		telegramSilent: stored.telegramSilent === true,
 		telegramPin: stored.telegramPin === true,
 		telegramMeta: typeof stored.telegramMeta === 'boolean' ? stored.telegramMeta : defaults.telegramMeta,
+		telegramDigestExcludeDiary:
+			typeof stored.telegramDigestExcludeDiary === 'boolean'
+				? stored.telegramDigestExcludeDiary
+				: defaults.telegramDigestExcludeDiary,
+		lastDigest: sanitizeDigest(stored.lastDigest),
 		siteDelete: siteDeleteSetting(stored.siteDelete),
 	};
+}
+
+function sanitizeDigest(value: unknown): DigestRecord | null {
+	if (!isRecord(value)) return null;
+	const { sentAt, messageId } = value;
+	if (typeof sentAt !== 'number' || !Number.isFinite(sentAt)) return null;
+	if (typeof messageId !== 'number' || !Number.isInteger(messageId)) return null;
+	return { sentAt, messageId };
 }
 
 function sanitizeSynced(value: unknown): Record<string, SyncedNote> {

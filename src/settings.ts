@@ -302,6 +302,16 @@ export class OddavaSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Exclude diary from digest')
+			.setDesc('The weekly digest skips notes under diary/. The preview has a checkbox to change this for one run.')
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.telegramDigestExcludeDiary).onChange(async (value) => {
+					this.plugin.settings.telegramDigestExcludeDiary = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
 			.setName('Telegram check')
 			.setDesc('Checks the bot token, the channel, and the bot’s admin rights. It does not post anything.')
 			.addButton((button) =>

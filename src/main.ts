@@ -42,6 +42,8 @@ import {
 } from './sync';
 import { SiteDeleteModal } from './site-delete-modal';
 import { TelegramPostModal } from './telegram-modal';
+import { TelegramDigestModal } from './telegram-digest-modal';
+import { buildDigest, DIGEST_MAX_NOTES, recentDigestWarning, selectDigestNotes, type Digest } from './telegram-digest';
 import {
 	coverCandidates,
 	describeParts,
@@ -49,6 +51,7 @@ import {
 	MAX_PHOTO_BYTES,
 	photoMimeType,
 	prepareTelegramPost,
+	readingMinutes,
 	publicNoteUrl,
 	telegramFollowUp,
 	withTelegramRecord,
@@ -168,6 +171,14 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 			name: 'Post current note to Telegram',
 			callback: () => {
 				void this.postActiveToTelegram();
+			},
+		});
+
+		this.addCommand({
+			id: 'post-weekly-digest-to-telegram',
+			name: 'Post weekly digest to Telegram',
+			callback: () => {
+				void this.openWeeklyDigest();
 			},
 		});
 
@@ -1495,6 +1506,81 @@ export default class OddavaNotesPlugin extends Plugin implements OddavaHost {
 				return outcome.record !== null;
 			}
 			this.notify(telegramSuccessNotice(draft, mode, outcome));
+			return true;
+		});
+	}
+
+	private async openWeeklyDigest(): Promise<void> {
+		if (!this.alive) return;
+		const tokenProblem = telegramTokenProblem(this.settings.telegramBotToken);
+		if (tokenProblem) {
+			this.notify(tokenProblem, 8000);
+			return;
+		}
+		const channel = normalizeTelegramChannel(this.settings.telegramChannel);
+		if (!channel) {
+			this.notify('Set a Telegram channel, like @justoddava.', 8000);
+			return;
+		}
+		await this.withClient(async (client) => {
+			const garden = await client.listGarden();
+			const now = Date.now();
+			const defaultExclude = this.settings.telegramDigestExcludeDiary;
+			if (selectDigestNotes(garden.notes, garden.deleted, { now, excludeDiary: defaultExclude }).length === 0) {
+				this.notify('No notes updated in the last 7 days');
+				return;
+			}
+			// Reading time comes from the synced copy in the vault, when there is one.
+			const minutes = new Map<string, number>();
+			if (this.settings.telegramMeta) {
+				const candidates = selectDigestNotes(garden.notes, garden.deleted, { now, excludeDiary: false });
+				for (const note of candidates.slice(0, DIGEST_MAX_NOTES * 2)) {
+					try {
+						const file = this.app.vault.getAbstractFileByPath(vaultPathForApi(this.settings.syncFolder, note.path));
+						if (file instanceof TFile) minutes.set(note.path, readingMinutes(await this.app.vault.cachedRead(file)));
+					} catch {
+						// No local copy, so no reading time for this note.
+					}
+				}
+			}
+			const build = (excludeDiary: boolean): Digest | null => {
+				const selected = selectDigestNotes(garden.notes, garden.deleted, { now, excludeDiary });
+				return selected.length === 0
+					? null
+					: buildDigest({ notes: selected, baseUrl: this.settings.baseUrl, now, minutes });
+			};
+			new TelegramDigestModal(this.app, {
+				channel,
+				silent: this.settings.telegramSilent,
+				excludeDiary: defaultExclude,
+				warning: recentDigestWarning(this.settings.lastDigest, now),
+				build,
+				send: (digest) => this.sendWeeklyDigest(digest, channel),
+			}).open();
+		});
+	}
+
+	private async sendWeeklyDigest(digest: Digest, channel: string): Promise<boolean> {
+		return this.withTelegramSend('weekly-digest', async () => {
+			const api = createTelegramApi(this.http, this.settings.telegramBotToken);
+			const send = (plain: boolean): Promise<number> =>
+				api.sendMessage({
+					chatId: channel,
+					html: plain ? digest.plain : digest.html,
+					plain,
+					linkPreview: { is_disabled: true },
+					silent: this.settings.telegramSilent,
+				});
+			let messageId: number;
+			try {
+				messageId = await send(false);
+			} catch (error) {
+				if (!(error instanceof TelegramApiError) || error.kind !== 'parse') throw error;
+				messageId = await send(true);
+			}
+			this.settings.lastDigest = { sentAt: Date.now(), messageId };
+			await this.saveSettings();
+			this.notify(`Posted the weekly digest to ${channel}.`);
 			return true;
 		});
 	}
