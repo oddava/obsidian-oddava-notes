@@ -62,6 +62,10 @@ export interface TelegramFrontmatter {
 	image?: string;
 	/** `telegram_preview`: link preview override, such as `off` or `small-above`. */
 	preview?: string;
+	/** `telegram_silent: true|false`. Overrides the "Post silently" setting. */
+	silent?: boolean;
+	/** `telegram_pin: true|false`. Overrides the "Pin posts by default" setting. */
+	pin?: boolean;
 }
 
 /** Keys the plugin owns. A pull from the site must not lose them. */
@@ -74,6 +78,8 @@ export const TELEGRAM_KEYS = [
 	'telegram_format',
 	'telegram_image',
 	'telegram_preview',
+	'telegram_silent',
+	'telegram_pin',
 ] as const;
 
 export function readTelegramFrontmatter(content: string): TelegramFrontmatter {
@@ -102,7 +108,47 @@ export function readTelegramFrontmatter(content: string): TelegramFrontmatter {
 		format: readFrontmatterScalar(raw, 'telegram_format')?.toLowerCase(),
 		image: readFrontmatterScalar(raw, 'telegram_image'),
 		preview: readFrontmatterScalar(raw, 'telegram_preview')?.toLowerCase(),
+		silent: readFrontmatterBoolean(raw, 'telegram_silent'),
+		pin: readFrontmatterBoolean(raw, 'telegram_pin'),
 	};
+}
+
+/** `true`/`yes` or `false`/`no`. Anything else is not an override. */
+function readFrontmatterBoolean(raw: string, key: string): boolean | undefined {
+	const value = readFrontmatterScalar(raw, key)?.trim().toLowerCase();
+	if (value === 'true' || value === 'yes') return true;
+	if (value === 'false' || value === 'no') return false;
+	return undefined;
+}
+
+/**
+ * A list value: `[a, b]`, a block list of `- item` lines, or a plain string
+ * split on commas and spaces (how Obsidian reads `tags: a b`).
+ */
+export function readFrontmatterList(raw: string, key: string): string[] {
+	const lines = raw.split(/\r?\n/);
+	const unquote = (item: string): string => item.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+	for (let index = 0; index < lines.length; index += 1) {
+		const match = (lines[index] as string).match(new RegExp(`^${key}:\\s*(.*)$`));
+		if (!match) continue;
+		const value = (match[1] ?? '').trim();
+		if (value) {
+			const bracketed = value.startsWith('[') && value.endsWith(']');
+			const inner = bracketed ? value.slice(1, -1) : value;
+			return inner.split(bracketed ? ',' : /[,\s]+/).map(unquote).filter(Boolean);
+		}
+		const items: string[] = [];
+		for (let next = index + 1; next < lines.length; next += 1) {
+			const line = lines[next] as string;
+			if (!line.trim()) continue;
+			const item = line.match(/^\s*-\s+(.*)$/);
+			if (!item) break;
+			const text = unquote(item[1] ?? '');
+			if (text) items.push(text);
+		}
+		return items;
+	}
+	return [];
 }
 
 function positiveId(value: string | undefined): number | undefined {

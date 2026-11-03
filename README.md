@@ -80,7 +80,9 @@ Removing a note in the vault does not delete it on the site until you say so. Se
 | Telegram post | Full note | **Full note** or **Summary and link**. |
 | Link preview | Large card below the text | The page's preview card: large or small, above or below the text, or off. |
 | Cover photo | on | Send the note's first image as a photo, with the post as its caption. |
-| Post silently | off | Post without a notification sound. |
+| Post silently | off | Post without a notification sound. `telegram_silent` in a note overrides it. |
+| Pin posts by default | off | Pin the first message after sending it. `telegram_pin` in a note overrides it. |
+| Show reading time and tags | on | Add a line like `⏱ 3 min read · #obsidian #notes` above the link. |
 | Test Telegram | | Checks the token, the channel, and the bot's admin rights. Posts nothing. |
 | When a note is deleted | Ask | Delete on the site, keep it, or ask. Site deletes go to the trash. |
 
@@ -120,6 +122,23 @@ A note that is outside the sync folder, or not published yet, is refused, becaus
 Telegram allows 4096 characters in a message and 1024 in a photo caption. A longer note is split into several messages, between paragraphs where it can, or at a line, sentence, or word when one paragraph is too long. Formatting carries across the cut. Only the first message plays a notification sound.
 
 **Summary and link** posts the title, the opening of the note with its formatting (lists stay lists), and the link. It reads past a short opening, such as a photo caption, until it has a few lines, and stops at about 600 characters. Code blocks and tables are left for the page. Choose it in settings, or for one note with `telegram_format: summary` (or `full`) in its frontmatter.
+
+### Reading time and tags
+
+With **Show reading time and tags** on, one line goes just above the **Read on oddava.me** link, such as `⏱ 3 min read · #obsidian #notes`. It counts toward the 4096 and 1024 character limits, so a long post is still split to fit.
+
+- The reading time is the note body only, without frontmatter, with code blocks counted as words. It is 200 words a minute, rounded up, and never less than 1 minute.
+- Tags come from the frontmatter `tags` (a list or a string) and from inline `#tags`, in that order, without repeats. Inline tags in code are ignored. Each becomes a Telegram hashtag: letters, digits, and `_` only, with `/` and `-` turned into `_` (`project/ideas` is `#project_ideas`). A tag that ends up empty or only digits is dropped.
+- A note without tags shows only the reading time.
+
+### Silent and pinned posts
+
+- `telegram_silent: true` or `false` in the frontmatter overrides **Post silently** for that note.
+- `telegram_pin: true` or `false` overrides **Pin posts by default**. The first message of the post is pinned right after it is sent, without a notification. The bot needs the **Pin messages** admin right.
+- Editing a post never pins it again. **Replace post** and **Post new** send new messages, so they pin like a first send.
+- If pinning fails, the post still counts as sent, a notice says why (usually the missing admin right), and the plugin does not try again. Pin the message by hand, or fix the right and use **Replace post**.
+
+The Post to Telegram dialog shows whether the post will be silent and pinned.
 
 ### Cover photo
 
