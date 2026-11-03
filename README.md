@@ -83,6 +83,7 @@ Removing a note in the vault does not delete it on the site until you say so. Se
 | Post silently | off | Post without a notification sound. `telegram_silent` in a note overrides it. |
 | Pin posts by default | off | Pin the first message after sending it. `telegram_pin` in a note overrides it. |
 | Show reading time and tags | on | Add a line like `⏱ 3 min read · #obsidian #notes` above the link. |
+| Exclude diary from digest | on | The [weekly digest](#weekly-digest) skips notes under `diary/`. |
 | Test Telegram | | Checks the token, the channel, and the bot's admin rights. Posts nothing. |
 | When a note is deleted | Ask | Delete on the site, keep it, or ask. Site deletes go to the trash. |
 
@@ -180,6 +181,16 @@ Publishing a note that already has a post updates the messages that changed, and
 - If a long post fails part-way, the messages that went out are still recorded. **Update post** sends the rest.
 - If Telegram cannot read the formatting of a message, that message is sent as plain text, and you are told.
 - Notices never include the bot token.
+
+## Weekly digest
+
+**Post weekly digest to Telegram** (command palette, desktop and mobile) posts one message listing the notes on oddava.me that changed in the last 7 days. Nothing is scheduled; it only runs when you run it. It uses the same bot token and channel as the other Telegram commands, and shows the same notice if either is missing.
+
+- **Which notes.** The site's note list, `updated` within the last 7 days counted back from now, newest first. Trashed notes are left out. At most 20 are listed; the rest become a line "…and N more on oddava.me". If the message would pass Telegram's 4096-character limit, notes are dropped from the end into that line.
+- **Diary.** With **Exclude diary from digest** on (the default), notes under `diary/` are skipped. The preview has an "Exclude diary" checkbox for one run; it starts from the setting.
+- **The post.** A bold header with the date range (for example `27 Oct – 3 Nov 2026`), one line per note (a bullet, the title linking to its page, and `⏱ N min` when the note is in your vault and **Show reading time and tags** is on), and a link to `https://oddava.me/notes`. It has no link preview and is never pinned. **Post silently** applies.
+- **Preview first.** A dialog shows the exact digest, the note count and the diary setting. **Send** posts it; **Cancel** sends nothing. If no notes match, you get a notice ("No notes updated in the last 7 days") and no dialog.
+- **No accidental repeats.** The send time and message id of the last digest are kept in the plugin's `data.json`, not in any note. If it was sent less than 6 days ago, the dialog warns, but you can still send.
 
 ## Create the token
 
