@@ -110,7 +110,11 @@ async function pinFirst(env: TelegramPostEnv, messageId: number, warnings: strin
 		await env.api.pinChatMessage({ chatId: env.chatId, messageId });
 		return true;
 	} catch (error) {
-		const reason = errorMessage(error);
+		// Prefer Telegram's own description (e.g. "not enough rights to pin a message")
+		// over the generic wording, which talks about posting rather than pinning.
+		const description =
+			error instanceof TelegramApiError ? error.description.replace(/^Bad Request:\s*/i, '').trim() : '';
+		const reason = description ? `Telegram said: ${description}.` : errorMessage(error);
 		warnings.push(
 			`The post was sent, but it could not be pinned. ${reason ? `${reason} ` : ''}Give the bot the "Pin messages" admin right in the channel, or pin it by hand.`,
 		);
